@@ -114,7 +114,7 @@ func main() {
 	fmt.Printf("Target language column: %s\n", targetLanguageColumn)
 
 	// Translate and update the sheet
-	iterateAndTranslate(f, sheetName, rows, sourceIndex-1, targetIndex-1, sourceLanguageColumn, targetLanguageColumn)
+	iterateAndTranslate(f, sheetName, rows, sourceIndex-1, targetIndex-1, sourceLanguageColumn, targetLanguageColumn, len(rows))
 
 	// Save the new file
 	newFileName := "translated-" + fileName
@@ -177,7 +177,7 @@ func isPlaceholder(text string) bool {
 }
 
 // Iterate over the rows of the Excel file
-func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
+func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, totalRows int) {
 	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
 	var previousText, previousTranslation string
 
@@ -202,7 +202,7 @@ func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, so
 
 		// Handle placeholders: copy them directly without translation
 		if isPlaceholder(text) {
-			fmt.Printf("Row %d: Copying placeholder '%s'\n", i+1, text)
+			fmt.Printf("Row %d/%d: Copying placeholder '%s'\n", i+1, totalRows, text)
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 			f.SetCellValue(sheetName, cell, text)
 			continue
@@ -224,10 +224,10 @@ func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, so
 					// If the suffix is just a number, don't translate it.
 					if _, err := strconv.Atoi(suffix); err == nil {
 						translatedText = translatedPreviousParts[0] + "#" + suffix
-						fmt.Printf("Row %d: Reusing prefix and appending number suffix for '%s'. Result: '%s'\n", i+1, text, translatedText)
+						fmt.Printf("Row %d/%d: Reusing prefix and appending number suffix for '%s'. Result: '%s'\n", i+1, totalRows, text, translatedText)
 					} else {
 						// Otherwise, translate the suffix.
-						fmt.Printf("Row %d: Reusing prefix for '%s'. Translating suffix '%s'... ", i+1, text, suffix)
+						fmt.Printf("Row %d/%d: Reusing prefix for '%s'. Translating suffix '%s'... ", i+1, totalRows, text, suffix)
 						suffixTranslation, err := translateText(client, suffix, sourceLang, targetLang)
 						if err != nil {
 							fmt.Printf("Error: %v\n", err)
@@ -243,7 +243,7 @@ func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, so
 		}
 
 		// Full translation for new or non-matching texts
-		fmt.Printf("Row %d: Translating '%s' from %s to %s... ", i+1, text, sourceLang, targetLang)
+		fmt.Printf("Row %d/%d: Translating '%s' from %s to %s... ", i+1, totalRows, text, sourceLang, targetLang)
 		translatedText, err = translateText(client, text, sourceLang, targetLang)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
