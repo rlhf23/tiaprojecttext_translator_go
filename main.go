@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -12,155 +11,207 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/xuri/excelize/v2"
 )
 
-func main() {
-	// Check for OpenAI API Key
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("Error: OPENAI_API_KEY environment variable is not set")
+// ///////////////////
+// TUI STYLES
+// ///////////////////
+var (
+	docStyle    = lipgloss.NewStyle().Margin(1, 2)
+	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	errMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+)
+
+// ///////////////////
+// BUBBLETEA MODEL
+// ///////////////////
+type model struct {
+	percent    float64
+	logMessages []string
+	progressBar progress.Model
+	done        bool
+	err         error
+}
+
+type progressMsg float64
+type logMsg string
+type doneMsg struct{}
+
+func (m model) Init() tea.Cmd {
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		return m, tea.Quit
+
+	case progress.FrameMsg:
+		progressModel, cmd := m.progressBar.Update(msg)
+		m.progressBar = progressModel.(progress.Model)
+		return m, cmd
+
+	case progressMsg:
+		m.percent = float64(msg)
+		return m, m.progressBar.SetPercent(float64(msg))
+
+	case logMsg:
+		m.logMessages = append(m.logMessages, string(msg))
+		if len(m.logMessages) > 5 {
+			m.logMessages = m.logMessages[1:]
+		}
+		return m, nil
+
+	case doneMsg:
+		m.done = true
+		return m, tea.Quit
+
+	case error:
+		m.err = msg
+		return m, tea.Quit
+
+	default:
+		return m, nil
+	}
+}
+
+func (m model) View() string {
+	if m.err != nil {
+		return docStyle.Render(errMsgStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 	}
 
-	// List .xlsx files
+	progressView := m.progressBar.View() + "\n\n"
+
+	logs := strings.Join(m.logMessages, "\n")
+
+	var help string
+	if !m.done {
+		help = helpStyle.Render("Translating... Press any key to quit.")
+	} else {
+		help = helpStyle.Render("Translation complete!")
+	}
+
+	return docStyle.Render(progressView + logs + "\n\n" + help)
+}
+
+func main() {
+	// ///////////////////
+	// 1. GET USER INPUT
+	// ///////////////////
+	if os.Getenv("OPENAI_API_KEY") == "" {
+		log.Fatal("Error: OPENAI_API_KEY environment variable not set.")
+	}
+
 	files, err := filepath.Glob("*.xlsx")
 	if err != nil {
-		log.Fatalf("Failed to read directory: %v", err)
+		log.Fatalf("Error finding .xlsx files: %v", err)
 	}
 
-	var validFiles []string
+	var filteredFiles []string
 	for _, file := range files {
-		if !strings.HasPrefix(file, "translated") {
-			validFiles = append(validFiles, file)
+		if !strings.HasPrefix(file, "translated-") {
+			filteredFiles = append(filteredFiles, file)
 		}
 	}
 
-	if len(validFiles) == 0 {
+	if len(filteredFiles) == 0 {
 		log.Fatal("No .xlsx files found to translate.")
 	}
 
-	fmt.Println("Please select a file to translate:")
-	for i, file := range validFiles {
-		fmt.Printf("%d: %s\n", i+1, file)
+	var fileName string
+	var sourceLangIndex, targetLangIndex int
+
+	fileOptions := make([]huh.Option[string], len(filteredFiles))
+	for i, f := range filteredFiles {
+		fileOptions[i] = huh.NewOption(f, f)
 	}
 
-	// Get user input for file selection
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter the number of the file: ")
-	input, _ := reader.ReadString('\n')
-	fileIndex, err := strconv.Atoi(strings.TrimSpace(input))
-	if err != nil || fileIndex < 1 || fileIndex > len(validFiles) {
-		log.Fatal("Invalid selection.")
-	}
-	fileName := validFiles[fileIndex-1]
-	fmt.Printf("You selected %s\n", fileName)
+	form := huh.NewForm(
+		huh.NewGroup(huh.NewSelect[string]().Title("Select a file to translate").Options(fileOptions...).Value(&fileName)),
+	)
 
-	// Open the Excel file
+	if err := form.Run(); err != nil {
+		log.Fatal(err)
+	}
+
 	f, err := excelize.OpenFile(fileName)
 	if err != nil {
-		log.Fatalf("Error reading Excel file: %v", err)
+		log.Fatalf("Error opening file: %v", err)
 	}
 	defer f.Close()
 
-	// Get the first sheet name
 	sheetName := f.GetSheetName(0)
 	rows, err := f.GetRows(sheetName)
 	if err != nil {
-		log.Fatalf("Failed to get rows: %v", err)
+		log.Fatalf("Error getting rows: %v", err)
 	}
-
-	if len(rows) == 0 {
-		log.Fatal("The selected Excel file is empty.")
-	}
-
 	headers := rows[0]
-
-	// Get source language column
-	fmt.Println("\nPlease select the source language column:")
-	for i, header := range headers {
-		if i >= 4 && !strings.HasPrefix(strings.ToLower(header), "ref") {
-			fmt.Printf("%d: %s\n", i+1, header)
+	var colOptions []huh.Option[int]
+	for i, h := range headers {
+		// Filter out reference columns, which are not useful for translation.
+		if !strings.HasPrefix(strings.ToLower(h), "ref=") {
+			colOptions = append(colOptions, huh.NewOption(fmt.Sprintf("%s (Col %d)", h, i+1), i))
 		}
 	}
-	fmt.Printf("Enter the number of the source language column ([6]: %s): ", headers[5])
-	input, _ = reader.ReadString('\n')
-	sourceIndex := 6
-	if strings.TrimSpace(input) != "" {
-		sourceIndex, err = strconv.Atoi(strings.TrimSpace(input))
-		if err != nil || sourceIndex < 1 || sourceIndex > len(headers) {
-			log.Fatal("Invalid selection for source language column.")
-		}
-	}
-	sourceLanguageColumn := headers[sourceIndex-1]
-	fmt.Printf("Source language column: %s\n", sourceLanguageColumn)
 
-	// Get target language column
-	fmt.Println("\nPlease select the target language column:")
-	for i, header := range headers {
-		if i >= 4 && !strings.HasPrefix(strings.ToLower(header), "ref") {
-			fmt.Printf("%d: %s\n", i+1, header)
-		}
-	}
-	fmt.Printf("Enter the number of the target language column ([7]: %s): ", headers[6])
-	input, _ = reader.ReadString('\n')
-	targetIndex := 7
-	if strings.TrimSpace(input) != "" {
-		targetIndex, err = strconv.Atoi(strings.TrimSpace(input))
-		if err != nil || targetIndex < 1 || targetIndex > len(headers) {
-			log.Fatal("Invalid selection for target language column.")
-		}
-	}
-	targetLanguageColumn := headers[targetIndex-1]
-	fmt.Printf("Target language column: %s\n", targetLanguageColumn)
-
-	// Translate and update the sheet
-	iterateAndTranslate(f, sheetName, rows, sourceIndex-1, targetIndex-1, sourceLanguageColumn, targetLanguageColumn, len(rows))
-
-	// Save the new file
-	newFileName := "translated-" + fileName
-	if err := f.SaveAs(newFileName); err != nil {
-		log.Fatalf("Failed to save file: %v", err)
-	}
-	fmt.Printf("\nTranslation complete. File saved as %s\n", newFileName)
-}
-
-// Translation function using OpenAI's chat model
-func translateText(client *openai.Client, text, sourceLanguage, targetLanguage string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.CreateChatCompletion(
-		ctx,
-		openai.ChatCompletionRequest{
-			Model: openai.GPT4oMini,
-			Messages: []openai.ChatCompletionMessage{
-				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: fmt.Sprintf("You will be provided with a sentence in %s, and your task is to translate it into %s. These are messages concerning industrial machines. Right means the direction right. AC means AC motor.", sourceLanguage, targetLanguage),
-				},
-				{
-					Role:    openai.ChatMessageRoleUser,
-					Content: text,
-				},
-			},
-			Temperature: 0,
-			MaxTokens:   60,
-		},
+	langForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[int]().Title("Select Source Language Column").Options(colOptions...).Value(&sourceLangIndex),
+			huh.NewSelect[int]().Title("Select Target Language Column").Options(colOptions...).Value(&targetLangIndex),
+		),
 	)
 
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("translation request timed out")
-		}
-		return "", fmt.Errorf("error during translation: %w", err)
+	if err := langForm.Run(); err != nil {
+		log.Fatal(err)
 	}
 
+	// ///////////////////
+	// 2. RUN TRANSLATION WITH TUI
+	// ///////////////////
+	m := model{
+		progressBar: progress.New(progress.WithDefaultGradient()),
+	}
+	p := tea.NewProgram(m)
+
+	go iterateAndTranslate(p, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex])
+
+	if _, err := p.Run(); err != nil {
+		log.Fatalf("Error running program: %v", err)
+	}
+
+	// ///////////////////
+	// 3. SAVE FILE
+	// ///////////////////
+	newFileName := "translated-" + fileName
+	if err := f.SaveAs(newFileName); err != nil {
+		log.Fatalf("Error saving new file: %v", err)
+	}
+	fmt.Println(helpStyle.Render(fmt.Sprintf("\nTranslation saved to %s", newFileName)))
+}
+
+func translateText(client *openai.Client, text, sourceLang, targetLang string) (string, error) {
+	prompt := fmt.Sprintf("You are a professional translator. Translate the following text from '%s' to '%s'. Do not add any extra conversational text, just provide the translation. If the text is a placeholder or code, return it as is. The text to translate is: \"%s\"", sourceLang, targetLang, text)
+	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
+		Model: openai.GPT4oMini,
+		Messages: []openai.ChatCompletionMessage{{
+			Role:    openai.ChatMessageRoleUser,
+			Content: prompt,
+		}},
+	})
+	if err != nil {
+		return "", err
+	}
 	return resp.Choices[0].Message.Content, nil
 }
 
 var meaninglessAlarmRegex = regexp.MustCompile(`(?i)^alarm\s+\d+:\s*$`) // For alarms like "Alarm 16: "
 
-// isPlaceholder checks if a string is a placeholder that should be copied, not translated.
 func isPlaceholder(text string) bool {
 	switch {
 	case strings.HasPrefix(text, "##") && strings.HasSuffix(text, "##"):
@@ -176,65 +227,62 @@ func isPlaceholder(text string) bool {
 	}
 }
 
-// Iterate over the rows of the Excel file
-func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, totalRows int) {
+func iterateAndTranslate(p *tea.Program, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
+	defer func() { p.Send(doneMsg{}) }()
+
 	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
 	var previousText, previousTranslation string
+	totalRows := len(rows)
 
 	for i, row := range rows {
+		p.Send(progressMsg(float64(i+1) / float64(totalRows))) // Update progress
+
 		if i == 0 { // Skip header row
 			continue
 		}
-
 		if len(row) <= sourceIndex {
 			continue
 		}
 
 		text := strings.TrimSpace(row[sourceIndex])
 
-		// Basic validation: skip empty, short, or purely numeric strings
-		if len(text) < 3 {
+		if len(text) < 3 || (len(text) > 0 && text[0] == '!') {
 			continue
 		}
 		if _, err := strconv.Atoi(text); err == nil {
 			continue
 		}
 
-		// Handle placeholders: copy them directly without translation
 		if isPlaceholder(text) {
-			fmt.Printf("Row %d/%d: Copying placeholder '%s'\n", i+1, totalRows, text)
+			p.Send(logMsg(fmt.Sprintf("Copied placeholder: %s", text)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 			f.SetCellValue(sheetName, cell, text)
+			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
 
 		var translatedText string
 		var err error
 
-		// Smart reuse for texts with a "#" separator
 		if strings.Contains(text, "#") && strings.Contains(previousText, "#") {
 			currentParts := strings.SplitN(text, "#", 2)
 			previousParts := strings.SplitN(previousText, "#", 2)
 
-			// If the prefix matches, reuse the translated prefix
 			if len(currentParts) == 2 && len(previousParts) == 2 && currentParts[0] == previousParts[0] {
 				translatedPreviousParts := strings.SplitN(previousTranslation, "#", 2)
 				if len(translatedPreviousParts) == 2 {
 					suffix := strings.TrimSpace(currentParts[1])
-					// If the suffix is just a number, don't translate it.
 					if _, err := strconv.Atoi(suffix); err == nil {
 						translatedText = translatedPreviousParts[0] + "#" + suffix
-						fmt.Printf("Row %d/%d: Reusing prefix and appending number suffix for '%s'. Result: '%s'\n", i+1, totalRows, text, translatedText)
+						p.Send(logMsg(fmt.Sprintf("Reused prefix for: %s", text)))
 					} else {
-						// Otherwise, translate the suffix.
-						fmt.Printf("Row %d/%d: Reusing prefix for '%s'. Translating suffix '%s'... ", i+1, totalRows, text, suffix)
+						p.Send(logMsg(fmt.Sprintf("Translating suffix: %s", suffix)))
 						suffixTranslation, err := translateText(client, suffix, sourceLang, targetLang)
 						if err != nil {
-							fmt.Printf("Error: %v\n", err)
-							translatedText = text // Fallback to original text on error
+							p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
+							translatedText = text
 						} else {
 							translatedText = translatedPreviousParts[0] + "#" + suffixTranslation
-							fmt.Printf("Result: '%s'\n", translatedText)
 						}
 					}
 					goto saveAndContinue
@@ -242,22 +290,19 @@ func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, so
 			}
 		}
 
-		// Full translation for new or non-matching texts
-		fmt.Printf("Row %d/%d: Translating '%s' from %s to %s... ", i+1, totalRows, text, sourceLang, targetLang)
+		p.Send(logMsg(fmt.Sprintf("Translating: %s", text)))
 		translatedText, err = translateText(client, text, sourceLang, targetLang)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			continue // Skip saving on error
+			p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
+			continue
 		}
-		fmt.Printf("Result: '%s'\n", translatedText)
 
 		saveAndContinue:
-		// Save the translated text
 		cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 		f.SetCellValue(sheetName, cell, translatedText)
 
-		// Update history for the next iteration
 		previousText = text
 		previousTranslation = translatedText
+		time.Sleep(50 * time.Millisecond) // Rate limit and slow down for UI
 	}
 }
