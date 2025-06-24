@@ -158,31 +158,28 @@ func translateText(client *openai.Client, text, sourceLanguage, targetLanguage s
 	return resp.Choices[0].Message.Content, nil
 }
 
-var numRegex = regexp.MustCompile(`\d+`)
-var meaninglessAlarmRegex = regexp.MustCompile(`(?i)^alarm\s+\d+:\s*$`)
+var meaninglessAlarmRegex = regexp.MustCompile(`(?i)^alarm\s+\d+:\s*$`) // For alarms like "Alarm 16: "
 
-// normalizeText replaces all numbers in a string with a placeholder "{{N}}"
-// and returns the normalized string and the numbers that were replaced.
-func normalizeText(text string) (string, []string) {
-	numbers := numRegex.FindAllString(text, -1)
-	normalized := numRegex.ReplaceAllString(text, "{{N}}")
-	return normalized, numbers
-}
-
-// isMeaningless checks if a string is a candidate for skipping translation.
-func isMeaningless(text string) bool {
-	if meaninglessAlarmRegex.MatchString(text) {
+// isPlaceholder checks if a string is a placeholder that should be copied, not translated.
+func isPlaceholder(text string) bool {
+	switch {
+	case strings.HasPrefix(text, "##") && strings.HasSuffix(text, "##"):
 		return true
+	case strings.HasPrefix(text, "#") && strings.HasSuffix(text, "#") && len(text) > 1:
+		return true
+	case strings.HasPrefix(text, "@") && strings.HasSuffix(text, "@"):
+		return true
+	case meaninglessAlarmRegex.MatchString(text):
+		return true
+	default:
+		return false
 	}
-	// Add other rules here if needed
-	return false
 }
 
 // Iterate over the rows of the Excel file
 func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
 	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
-	// Cache for translated patterns. Key: normalized source text, Value: normalized translated text
-	patternCache := make(map[string]string)
+	var previousText, previousTranslation string
 
 	for i, row := range rows {
 		if i == 0 { // Skip header row
@@ -195,60 +192,72 @@ func iterateAndTranslate(f *excelize.File, sheetName string, rows [][]string, so
 
 		text := strings.TrimSpace(row[sourceIndex])
 
-		// Basic validation
-		if len(text) < 4 {
+		// Basic validation: skip empty, short, or purely numeric strings
+		if len(text) < 3 {
 			continue
 		}
-		if _, err := strconv.Atoi(text); err == nil { // is a number
-			continue
-		}
-
-		// Skip meaningless text
-		if isMeaningless(text) {
-			fmt.Printf("Row %d: Skipping meaningless text '%s'\n", i+1, text)
+		if _, err := strconv.Atoi(text); err == nil {
 			continue
 		}
 
-		pattern, numbers := normalizeText(text)
+		// Handle placeholders: copy them directly without translation
+		if isPlaceholder(text) {
+			fmt.Printf("Row %d: Copying placeholder '%s'\n", i+1, text)
+			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
+			f.SetCellValue(sheetName, cell, text)
+			continue
+		}
+
 		var translatedText string
 		var err error
-		foundInCache := false
 
-		if translatedPattern, found := patternCache[pattern]; found && len(numbers) > 0 {
-			// We have a cached pattern, try to reconstruct the translation
-			if strings.Count(translatedPattern, "{{N}}") == len(numbers) {
-				tempTranslated := translatedPattern
-				for _, num := range numbers {
-					tempTranslated = strings.Replace(tempTranslated, "{{N}}", num, 1)
-				}
-				translatedText = tempTranslated
-				fmt.Printf("Row %d: Reusing translation pattern for '%s' -> '%s'\n", i+1, text, translatedText)
-				foundInCache = true
-			}
-		}
+		// Smart reuse for texts with a "#" separator
+		if strings.Contains(text, "#") && strings.Contains(previousText, "#") {
+			currentParts := strings.SplitN(text, "#", 2)
+			previousParts := strings.SplitN(previousText, "#", 2)
 
-		if !foundInCache {
-			// Not in cache or pattern reconstruction failed, so translate it
-			fmt.Printf("Row %d: Translating '%s' from %s to %s... ", i+1, text, sourceLang, targetLang)
-			translatedText, err = translateText(client, text, sourceLang, targetLang)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				continue // Skip saving on error
-			}
-			fmt.Printf("Result: '%s'\n", translatedText)
-
-			// Add the new translation to the pattern cache if it has numbers
-			if len(numbers) > 0 {
-				translatedPattern, translatedNumbers := normalizeText(translatedText)
-				if len(numbers) == len(translatedNumbers) {
-					patternCache[pattern] = translatedPattern
-					fmt.Printf("Row %d: Caching new pattern for '%s'\n", i+1, pattern)
+			// If the prefix matches, reuse the translated prefix
+			if len(currentParts) == 2 && len(previousParts) == 2 && currentParts[0] == previousParts[0] {
+				translatedPreviousParts := strings.SplitN(previousTranslation, "#", 2)
+				if len(translatedPreviousParts) == 2 {
+					suffix := strings.TrimSpace(currentParts[1])
+					// If the suffix is just a number, don't translate it.
+					if _, err := strconv.Atoi(suffix); err == nil {
+						translatedText = translatedPreviousParts[0] + "#" + suffix
+						fmt.Printf("Row %d: Reusing prefix and appending number suffix for '%s'. Result: '%s'\n", i+1, text, translatedText)
+					} else {
+						// Otherwise, translate the suffix.
+						fmt.Printf("Row %d: Reusing prefix for '%s'. Translating suffix '%s'... ", i+1, text, suffix)
+						suffixTranslation, err := translateText(client, suffix, sourceLang, targetLang)
+						if err != nil {
+							fmt.Printf("Error: %v\n", err)
+							translatedText = text // Fallback to original text on error
+						} else {
+							translatedText = translatedPreviousParts[0] + "#" + suffixTranslation
+							fmt.Printf("Result: '%s'\n", translatedText)
+						}
+					}
+					goto saveAndContinue
 				}
 			}
 		}
 
+		// Full translation for new or non-matching texts
+		fmt.Printf("Row %d: Translating '%s' from %s to %s... ", i+1, text, sourceLang, targetLang)
+		translatedText, err = translateText(client, text, sourceLang, targetLang)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue // Skip saving on error
+		}
+		fmt.Printf("Result: '%s'\n", translatedText)
+
+		saveAndContinue:
 		// Save the translated text
 		cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 		f.SetCellValue(sheetName, cell, translatedText)
+
+		// Update history for the next iteration
+		previousText = text
+		previousTranslation = translatedText
 	}
 }
