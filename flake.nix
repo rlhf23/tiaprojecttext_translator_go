@@ -13,8 +13,10 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [
-            pkgs.go
+          buildInputs = with pkgs; [
+            go
+            zip
+            upx
           ];
         };
       });
