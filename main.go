@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -104,6 +106,9 @@ func main() {
 	// ///////////////////
 	// 1. GET USER INPUT
 	// ///////////////////
+	csvOutput := flag.Bool("csv", false, "Output to a CSV file instead of XLSX for debugging.")
+	flag.Parse()
+
 	if os.Getenv("OPENAI_API_KEY") == "" {
 		log.Fatal("Error: OPENAI_API_KEY environment variable not set.")
 	}
@@ -188,10 +193,21 @@ func main() {
 	// ///////////////////
 	// 3. SAVE FILE
 	// ///////////////////
-	newFileName := "translated-" + fileName
-	if err := f.SaveAs(newFileName); err != nil {
-		log.Fatalf("Error saving new file: %v", err)
+	baseName := "translated-" + strings.TrimSuffix(fileName, filepath.Ext(fileName))
+	var newFileName string
+
+	if *csvOutput {
+		newFileName = baseName + ".csv"
+		if err := saveAsCSV(f, sheetName, newFileName); err != nil {
+			log.Fatalf("Error saving new CSV file: %v", err)
+		}
+	} else {
+		newFileName = baseName + ".xlsx"
+		if err := f.SaveAs(newFileName); err != nil {
+			log.Fatalf("Error saving new XLSX file: %v", err)
+		}
 	}
+
 	fmt.Println(helpStyle.Render(fmt.Sprintf("\nTranslation saved to %s", newFileName)))
 }
 
@@ -226,6 +242,24 @@ func isPlaceholder(text string) bool {
 	default:
 		return false
 	}
+}
+
+func saveAsCSV(f *excelize.File, sheetName, newFileName string) error {
+	file, err := os.Create(newFileName)
+	if err != nil {
+		return fmt.Errorf("failed to create CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	rows, err := f.GetRows(sheetName)
+	if err != nil {
+		return fmt.Errorf("failed to get rows from sheet: %w", err)
+	}
+
+	return writer.WriteAll(rows)
 }
 
 func iterateAndTranslate(p *tea.Program, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
