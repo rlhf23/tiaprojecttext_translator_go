@@ -196,7 +196,7 @@ func main() {
 }
 
 func translateText(client *openai.Client, text, sourceLang, targetLang string) (string, error) {
-	prompt := fmt.Sprintf("You are a professional translator. Translate the following text from '%s' to '%s'. Do not add any extra conversational text, just provide the translation. If the text is a placeholder or code, return it as is. The text to translate is: \"%s\"", sourceLang, targetLang, text)
+	prompt := fmt.Sprintf("You are a professional translator. Translate the following text from '%s' to '%s'. Do not add any extra conversational text or quotation marks, just provide the translation. If the text is a placeholder or code, return it as is. The text to translate is: %s", sourceLang, targetLang, text)
 	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
 		Model: openai.GPT4oMini,
 		Messages: []openai.ChatCompletionMessage{{
@@ -207,7 +207,8 @@ func translateText(client *openai.Client, text, sourceLang, targetLang string) (
 	if err != nil {
 		return "", err
 	}
-	return resp.Choices[0].Message.Content, nil
+	translation := resp.Choices[0].Message.Content
+	return strings.Trim(translation, "\""), nil
 }
 
 var meaninglessAlarmRegex = regexp.MustCompile(`(?i)^alarm\s+\d+:\s*$`) // For alarms like "Alarm 16: "
