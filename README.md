@@ -15,3 +15,21 @@ Or in PowerShell with:
 $env:OPENAI_API_KEY="your-secret-api-key"
 ```
 After that, you can run the program by simply typing translator.exe.
+
+------
+
+To create a smaller executable for distribution, you can use the following steps.
+
+1.  Build with Linker Flags:
+    This command strips debugging information from the binary, significantly reducing its size.
+
+    ```bash
+    go build -ldflags="-s -w" -o translator.exe .
+    ```
+
+2.  Compress with UPX:
+    For even greater size reduction, compress the stripped binary using `upx`.
+
+    ```bash
+    upx --best -o translator_compressed.exe translator.exe
+    ```
