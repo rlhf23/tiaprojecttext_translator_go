@@ -65,7 +65,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case logMsg:
 		m.logMessages = append(m.logMessages, string(msg))
-		if len(m.logMessages) > 5 {
+		if len(m.logMessages) > 10 {
 			m.logMessages = m.logMessages[1:]
 		}
 		return m, nil
