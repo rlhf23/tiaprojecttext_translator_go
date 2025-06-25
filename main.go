@@ -159,8 +159,8 @@ func main() {
 	headers := rows[0]
 	var colOptions []huh.Option[int]
 	for i, h := range headers {
-		// Filter out reference columns, which are not useful for translation.
-		if !strings.HasPrefix(strings.ToLower(h), "ref=") {
+		// Skip the first 4 columns (metadata) and any reference columns.
+		if i >= 4 && !strings.HasPrefix(strings.ToLower(h), "ref=") {
 			colOptions = append(colOptions, huh.NewOption(fmt.Sprintf("%s (Col %d)", h, i+1), i))
 		}
 	}

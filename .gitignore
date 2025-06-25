@@ -1,7 +1,6 @@
 # Compiled executables
 *.exe
 
-# Translated output files
-translated-*.xlsx
-translated-*.csv
+# Source files
+*.xlsx
 *.csv
