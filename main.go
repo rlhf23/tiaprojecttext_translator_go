@@ -34,7 +34,7 @@ var (
 // BUBBLETEA MODEL
 // ///////////////////
 type model struct {
-	percent    float64
+	percent     float64
 	logMessages []string
 	progressBar progress.Model
 	done        bool
@@ -332,7 +332,7 @@ func iterateAndTranslate(p *tea.Program, f *excelize.File, sheetName string, row
 			continue
 		}
 
-		saveAndContinue:
+	saveAndContinue:
 		cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 		f.SetCellValue(sheetName, cell, translatedText)
 
