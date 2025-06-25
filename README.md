@@ -1,3 +1,7 @@
+Short CLI for translating bulk Project Text exports from Tia Portal projects via the Openai api. It goes down line by line, sending texts and getting replies, sometimes tries to optimize by skipping non-text and reusing text stubs. This is just a simple proof of concept, maybe for doing layouts and such, obviously not meant for production.
+
+------
+
 To run it, open a Command Prompt or PowerShell, navigate to the directory where you saved the file, and run it from there.
 
 Remember, since it's a command-line application, you will need to set the OPENAI_API_KEY environment variable on the Windows machine before running it. You can do this in Command Prompt with:
