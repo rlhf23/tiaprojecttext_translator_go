@@ -2,19 +2,40 @@ Short CLI for translating bulk Project Text exports from Tia Portal projects via
 
 ------
 
-To run it, open a Command Prompt or PowerShell, navigate to the directory where you saved the file, and run it from there.
+### How to Run
 
-Remember, since it's a command-line application, you will need to set the OPENAI_API_KEY environment variable on the Windows machine before running it. You can do this in Command Prompt with:
+1.  Place the `translator.exe` and your exported `.xlsx` file in the same folder.
+2.  Open a Command Prompt or PowerShell in that folder.
+3.  Provide your OpenAI API key using one of the methods below.
+4.  Run the program by typing `translator.exe`.
 
-```cmd
-set OPENAI_API_KEY=your-secret-api-key
-```
-Or in PowerShell with:
+### Providing Your OpenAI API Key
 
-```powershell
-$env:OPENAI_API_KEY="your-secret-api-key"
-```
-After that, you can run the program by simply typing translator.exe.
+The translator needs an API key from OpenAI to function. You can provide it in one of three ways, listed in order of priority:
+
+**1. Environment Variable (Recommended for developers)**
+
+The program will first check for an environment variable named `OPENAI_API_KEY`. You can set this for your current terminal session.
+
+-   In **Command Prompt**:
+    ```cmd
+    set OPENAI_API_KEY=your-secret-api-key
+    ```
+-   In **PowerShell**:
+    ```powershell
+    $env:OPENAI_API_KEY="your-secret-api-key"
+    ```
+
+**2. `api-key.txt` File (Easiest method)**
+
+If the environment variable is not set, the program will look for a file named `api-key.txt` in the same directory as `translator.exe`.
+
+1.  Create a new text file named `api-key.txt`.
+2.  Paste your secret OpenAI key into the file and save it.
+
+**3. On-Screen Prompt**
+
+If neither of the above methods is used, the program will prompt you to enter your API key directly in the terminal when you run it. The key will be hidden for privacy and is only used for the current session.
 
 ------
 

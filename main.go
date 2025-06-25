@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -109,8 +110,13 @@ func main() {
 	csvOutput := flag.Bool("csv", false, "Output to a CSV file instead of XLSX for debugging.")
 	flag.Parse()
 
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("Error: OPENAI_API_KEY environment variable not set.")
+	apiKey, err := getAPIKey()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := validateAPIKey(apiKey); err != nil {
+		log.Fatalf("API key validation failed: %v. Please check your key and try again.", err)
 	}
 
 	files, err := filepath.Glob("*.xlsx")
@@ -184,7 +190,7 @@ func main() {
 	}
 	p := tea.NewProgram(m)
 
-	go iterateAndTranslate(p, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex])
+	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex])
 
 	if _, err := p.Run(); err != nil {
 		log.Fatalf("Error running program: %v", err)
@@ -262,10 +268,83 @@ func saveAsCSV(f *excelize.File, sheetName, newFileName string) error {
 	return writer.WriteAll(rows)
 }
 
-func iterateAndTranslate(p *tea.Program, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
+// getAPIKey retrieves the OpenAI API key from one of the following sources
+// in order:
+// 1. OPENAI_API_KEY environment variable
+// 2. api-key.txt file in the executable's directory
+// 3. User prompt
+func getAPIKey() (string, error) {
+	// 1. Check environment variable
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		return key, nil
+	}
+
+	// 2. Check for api-key.txt file
+	// Get the directory of the executable
+	ex, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("could not get executable path: %w", err)
+	}
+	exPath := filepath.Dir(ex)
+	keyPath := filepath.Join(exPath, "api-key.txt")
+
+	// Check if the file exists and read it
+	if _, err := os.Stat(keyPath); err == nil {
+		keyBytes, err := os.ReadFile(keyPath)
+		if err != nil {
+			// If we can't read it, we'll just proceed to prompt the user.
+			// We can log this for debugging if needed, but for the user, it's not a fatal error.
+		} else {
+			key := strings.TrimSpace(string(keyBytes))
+			if key != "" {
+				return key, nil
+			}
+		}
+	}
+
+	// 3. Prompt user for key
+	var apiKey string
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("OpenAI API Key Not Found").
+				Description("Please enter your OpenAI API key.\nIt will not be stored, only used for this session.").
+				Value(&apiKey).
+				Password(true),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return "", fmt.Errorf("could not get API key from user: %w", err)
+	}
+
+	if apiKey == "" {
+		return "", fmt.Errorf("API key cannot be empty")
+	}
+
+	return apiKey, nil
+}
+
+// validateAPIKey makes a lightweight call to OpenAI to ensure the key is valid.
+func validateAPIKey(apiKey string) error {
+	client := openai.NewClient(apiKey)
+	// A simple, low-cost request to check for authentication.
+	_, err := client.ListModels(context.Background())
+	if err != nil {
+		// Check for a specific 401 Unauthorized error.
+		if apiErr, ok := err.(*openai.APIError); ok && apiErr.HTTPStatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("the provided API key is invalid or has expired")
+		}
+		// Return a more generic error for other issues (e.g., network problems).
+		return fmt.Errorf("could not connect to OpenAI: %w", err)
+	}
+	return nil
+}
+
+func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
 	defer func() { p.Send(doneMsg{}) }()
 
-	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
+	client := openai.NewClient(apiKey)
 	var previousText, previousTranslation string
 	totalRows := len(rows)
 
