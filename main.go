@@ -73,7 +73,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.done = true
-		return m, tea.Quit
+		return m, nil // Don't quit immediately, wait for user key press
 
 	case error:
 		m.err = msg
@@ -97,7 +97,7 @@ func (m model) View() string {
 	if !m.done {
 		help = helpStyle.Render("Translating... Press any key to quit.")
 	} else {
-		help = helpStyle.Render("Translation complete!")
+		help = helpStyle.Render("Translation complete! Press any key to exit.")
 	}
 
 	return docStyle.Render(progressView + logs + "\n\n" + help)
@@ -349,7 +349,13 @@ func validateAPIKey(apiKey string) error {
 }
 
 func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string) {
-	defer func() { p.Send(doneMsg{}) }()
+	var skippedCount int
+	defer func() {
+		if skippedCount > 0 {
+			p.Send(logMsg(fmt.Sprintf("Skipped %d rows in quick mode.", skippedCount)))
+		}
+		p.Send(doneMsg{})
+	}()
 
 	client := openai.NewClient(apiKey)
 	var previousText, previousTranslation string
@@ -392,8 +398,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 
 				// If the target cell has meaningful content, skip this row.
 				if targetText != "" && targetTextForCheck != "text" {
-					p.Send(logMsg(fmt.Sprintf("Skipping row %d (Quick Mode)", i+1)))
-					time.Sleep(10 * time.Millisecond) // To make the log visible
+					skippedCount++
 					continue
 				}
 			}
