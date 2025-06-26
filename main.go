@@ -378,6 +378,11 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 
 		text := strings.TrimSpace(row[sourceIndex])
 
+		// Skip translating the default "Text" value from TIA Portal.
+		if strings.EqualFold(text, "Text") {
+			continue
+		}
+
 		if len(text) < 3 || (len(text) > 0 && text[0] == '!') {
 			continue
 		}
