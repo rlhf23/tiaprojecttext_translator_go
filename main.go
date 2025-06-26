@@ -137,6 +137,7 @@ func main() {
 
 	var fileName string
 	var sourceLangIndex, targetLangIndex int
+	var translationMode string
 
 	fileOptions := make([]huh.Option[string], len(filteredFiles))
 	for i, f := range filteredFiles {
@@ -171,14 +172,20 @@ func main() {
 		}
 	}
 
-	langForm := huh.NewForm(
+	modeOptions := []huh.Option[string]{
+		huh.NewOption("Full (translate all)", "full").Selected(true),
+		huh.NewOption("Quick (only empty/placeholder target texts)", "quick"),
+	}
+
+	setupForm := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[int]().Title("Select Source Language Column").Options(colOptions...).Value(&sourceLangIndex),
 			huh.NewSelect[int]().Title("Select Target Language Column").Options(colOptions...).Value(&targetLangIndex),
+			huh.NewSelect[string]().Title("Select Translation Mode").Options(modeOptions...).Value(&translationMode),
 		),
 	)
 
-	if err := langForm.Run(); err != nil {
+	if err := setupForm.Run(); err != nil {
 		log.Fatal(err)
 	}
 
@@ -190,7 +197,7 @@ func main() {
 	}
 	p := tea.NewProgram(m)
 
-	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex])
+	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode)
 
 	if _, err := p.Run(); err != nil {
 		log.Fatalf("Error running program: %v", err)
@@ -341,7 +348,7 @@ func validateAPIKey(apiKey string) error {
 	return nil
 }
 
-func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string) {
+func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string) {
 	defer func() { p.Send(doneMsg{}) }()
 
 	client := openai.NewClient(apiKey)
@@ -354,6 +361,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 		if i == 0 { // Skip header row
 			continue
 		}
+
 		if len(row) <= sourceIndex {
 			continue
 		}
@@ -373,6 +381,22 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			f.SetCellValue(sheetName, cell, text)
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
+		}
+
+		// Quick mode: Only translate if target cell is empty or just "Text"
+		if translationMode == "quick" {
+			if len(row) > targetIndex {
+				targetText := strings.TrimSpace(row[targetIndex])
+				// Also remove quotes for comparison
+				targetTextForCheck := strings.ToLower(strings.Trim(targetText, `"`))
+
+				// If the target cell has meaningful content, skip this row.
+				if targetText != "" && targetTextForCheck != "text" {
+					p.Send(logMsg(fmt.Sprintf("Skipping row %d (Quick Mode)", i+1)))
+					time.Sleep(10 * time.Millisecond) // To make the log visible
+					continue
+				}
+			}
 		}
 
 		var translatedText string
