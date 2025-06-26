@@ -73,7 +73,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.done = true
-		return m, nil // Don't quit immediately, wait for user key press
+		// Wait 500ms before quitting to ensure final messages are displayed.
+		return m, func() tea.Msg {
+			time.Sleep(500 * time.Millisecond)
+			return tea.Quit()
+		}
 
 	case error:
 		m.err = msg
@@ -97,7 +101,7 @@ func (m model) View() string {
 	if !m.done {
 		help = helpStyle.Render("Translating... Press any key to quit.")
 	} else {
-		help = helpStyle.Render("Translation complete! Press any key to exit.")
+		help = helpStyle.Render("Translation complete!")
 	}
 
 	return docStyle.Render(progressView + logs + "\n\n" + help)
