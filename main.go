@@ -66,7 +66,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case logMsg:
 		m.logMessages = append(m.logMessages, string(msg))
-		if len(m.logMessages) > 10 {
+		if len(m.logMessages) > 50 {
 			m.logMessages = m.logMessages[1:]
 		}
 		return m, nil
@@ -107,6 +107,49 @@ func (m model) View() string {
 	return docStyle.Render(progressView + logs + "\n\n" + help)
 }
 
+// displayErrorAndExit shows an error in a TUI interface before exiting
+func displayErrorAndExit(err error) {
+	// Create a simple TUI to display the error
+	errorModel := model{
+		err: err,
+	}
+
+	p := tea.NewProgram(errorModel)
+	if _, runErr := p.Run(); runErr != nil {
+		// If TUI fails, fall back to log output
+		log.Fatalf("Error displaying error: %v\nOriginal error: %v", runErr, err)
+	}
+
+	// Exit with error code after TUI closes
+	os.Exit(1)
+}
+
+// hasUnderscoreNumberPattern checks if a text follows the pattern base_number
+func hasUnderscoreNumberPattern(text string) bool {
+	parts := strings.Split(text, "_")
+	if len(parts) < 2 {
+		return false
+	}
+	// Check if the last part is a number
+	_, err := strconv.Atoi(parts[len(parts)-1])
+	return err == nil
+}
+
+// extractBaseAndSuffix splits a text into base and suffix parts
+// For "Discrete_alarm_66", returns ("Discrete_alarm", "66")
+func extractBaseAndSuffix(text string) (string, string) {
+	parts := strings.Split(text, "_")
+	if len(parts) < 2 {
+		return text, ""
+	}
+
+	lastIndex := len(parts) - 1
+	base := strings.Join(parts[:lastIndex], "_")
+	suffix := parts[lastIndex]
+
+	return base, suffix
+}
+
 func main() {
 	// ///////////////////
 	// 1. GET USER INPUT
@@ -116,16 +159,16 @@ func main() {
 
 	apiKey, err := getAPIKey()
 	if err != nil {
-		log.Fatal(err)
+		displayErrorAndExit(err)
 	}
 
 	if err := validateAPIKey(apiKey); err != nil {
-		log.Fatalf("API key validation failed: %v. Please check your key and try again.", err)
+		displayErrorAndExit(fmt.Errorf("API key validation failed: %v. Please check your key and try again.", err))
 	}
 
 	files, err := filepath.Glob("*.xlsx")
 	if err != nil {
-		log.Fatalf("Error finding .xlsx files: %v", err)
+		displayErrorAndExit(fmt.Errorf("Error finding .xlsx files: %v", err))
 	}
 
 	var filteredFiles []string
@@ -136,7 +179,7 @@ func main() {
 	}
 
 	if len(filteredFiles) == 0 {
-		log.Fatal("No .xlsx files found to translate.")
+		displayErrorAndExit(fmt.Errorf("No .xlsx files found to translate."))
 	}
 
 	var fileName string
@@ -153,19 +196,19 @@ func main() {
 	)
 
 	if err := form.Run(); err != nil {
-		log.Fatal(err)
+		displayErrorAndExit(err)
 	}
 
 	f, err := excelize.OpenFile(fileName)
 	if err != nil {
-		log.Fatalf("Error opening file: %v", err)
+		displayErrorAndExit(fmt.Errorf("Error opening file: %v", err))
 	}
 	defer f.Close()
 
 	sheetName := f.GetSheetName(0)
 	rows, err := f.GetRows(sheetName)
 	if err != nil {
-		log.Fatalf("Error getting rows: %v", err)
+		displayErrorAndExit(fmt.Errorf("Error getting rows: %v", err))
 	}
 	headers := rows[0]
 	var colOptions []huh.Option[int]
@@ -190,7 +233,7 @@ func main() {
 	)
 
 	if err := setupForm.Run(); err != nil {
-		log.Fatal(err)
+		displayErrorAndExit(err)
 	}
 
 	// ///////////////////
@@ -204,7 +247,7 @@ func main() {
 	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode)
 
 	if _, err := p.Run(); err != nil {
-		log.Fatalf("Error running program: %v", err)
+		displayErrorAndExit(fmt.Errorf("Error running program: %v", err))
 	}
 
 	// ///////////////////
@@ -216,12 +259,12 @@ func main() {
 	if *csvOutput {
 		newFileName = baseName + ".csv"
 		if err := saveAsCSV(f, sheetName, newFileName); err != nil {
-			log.Fatalf("Error saving new CSV file: %v", err)
+			displayErrorAndExit(fmt.Errorf("Error saving new CSV file: %v", err))
 		}
 	} else {
 		newFileName = baseName + ".xlsx"
 		if err := f.SaveAs(newFileName); err != nil {
-			log.Fatalf("Error saving new XLSX file: %v", err)
+			displayErrorAndExit(fmt.Errorf("Error saving new XLSX file: %v", err))
 		}
 	}
 
@@ -383,15 +426,24 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			continue
 		}
 
-		if len(text) < 3 || (len(text) > 0 && text[0] == '!') {
-			continue
-		}
-		if _, err := strconv.Atoi(text); err == nil {
+		if isPlaceholder(text) {
+			p.Send(logMsg(fmt.Sprintf("Copied placeholder: %s", text)))
+			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
+			f.SetCellValue(sheetName, cell, text)
+			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
 
-		if isPlaceholder(text) {
-			p.Send(logMsg(fmt.Sprintf("Copied placeholder: %s", text)))
+		// Copy short texts and numerals in both modes
+		if len(text) < 3 || (len(text) > 0 && text[0] == '!') {
+			p.Send(logMsg(fmt.Sprintf("Copying short text: %s", text)))
+			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
+			f.SetCellValue(sheetName, cell, text)
+			time.Sleep(10 * time.Millisecond) // Slow down for UI
+			continue
+		}
+		if _, err := strconv.Atoi(text); err == nil {
+			p.Send(logMsg(fmt.Sprintf("Copying numeral: %s", text)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 			f.SetCellValue(sheetName, cell, text)
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
@@ -402,11 +454,18 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 		if translationMode == "quick" {
 			if len(row) > targetIndex {
 				targetText := strings.TrimSpace(row[targetIndex])
-				// Also remove quotes for comparison
+				// Remove quotes and convert to lowercase for comparison
 				targetTextForCheck := strings.ToLower(strings.Trim(targetText, `"`))
 
-				// If the target cell has meaningful content, skip this row.
-				if targetText != "" && targetTextForCheck != "text" {
+				// Debug logging for all quick mode checks
+				// p.Send(logMsg(fmt.Sprintf("Quick mode check: target=%q, processed=%q", targetText, targetTextForCheck)))
+
+				// Skip if target has meaningful content (not empty and not "text")
+				shouldSkip := targetTextForCheck != "" && targetTextForCheck != "text"
+				// p.Send(logMsg(fmt.Sprintf("Quick mode decision: skip=%t (empty=%t, isText=%t)", shouldSkip, targetTextForCheck == "", targetTextForCheck == "text")))
+
+				if shouldSkip {
+					p.Send(logMsg(fmt.Sprintf("Quick mode: skipping row %d", i+1)))
 					skippedCount++
 					continue
 				}
@@ -416,6 +475,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 		var translatedText string
 		var err error
 
+		// Handle # pattern (existing logic)
 		if strings.Contains(text, "#") && strings.Contains(previousText, "#") {
 			currentParts := strings.SplitN(text, "#", 2)
 			previousParts := strings.SplitN(previousText, "#", 2)
@@ -436,6 +496,33 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 						} else {
 							translatedText = translatedPreviousParts[0] + "#" + suffixTranslation
 						}
+					}
+					goto saveAndContinue
+				}
+			}
+		}
+
+		// Handle underscore + number pattern (new logic)
+		if hasUnderscoreNumberPattern(text) && hasUnderscoreNumberPattern(previousText) {
+			currentBase, currentSuffix := extractBaseAndSuffix(text)
+			previousBase, _ := extractBaseAndSuffix(previousText)
+
+			if currentBase == previousBase {
+				translatedPreviousBase, _ := extractBaseAndSuffix(previousTranslation)
+				if _, err := strconv.Atoi(currentSuffix); err == nil {
+					// Current suffix is a number, reuse the translated base
+					translatedText = translatedPreviousBase + "_" + currentSuffix
+					p.Send(logMsg(fmt.Sprintf("Reused base for: %s", text)))
+					goto saveAndContinue
+				} else {
+					// Current suffix is not a number, translate it
+					p.Send(logMsg(fmt.Sprintf("Translating suffix: %s", currentSuffix)))
+					suffixTranslation, err := translateText(client, currentSuffix, sourceLang, targetLang)
+					if err != nil {
+						p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
+						translatedText = text
+					} else {
+						translatedText = translatedPreviousBase + "_" + suffixTranslation
 					}
 					goto saveAndContinue
 				}
