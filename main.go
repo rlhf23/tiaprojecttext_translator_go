@@ -150,6 +150,23 @@ func extractBaseAndSuffix(text string) (string, string) {
 	return base, suffix
 }
 
+// isVisualSeparator checks if text is mostly visual separators (dashes, underscores, etc.)
+func isVisualSeparator(text string) bool {
+	if len(text) < 5 {
+		return false // Too short to be a separator
+	}
+
+	separatorChars := 0
+	for _, char := range text {
+		if char == '-' || char == '_' || char == '=' || char == '*' || char == '.' {
+			separatorChars++
+		}
+	}
+
+	// If 80% or more of the characters are separators, consider it a separator line
+	return float64(separatorChars)/float64(len(text)) >= 0.8
+}
+
 func main() {
 	// ///////////////////
 	// 1. GET USER INPUT
@@ -450,6 +467,12 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			continue
 		}
 
+		// Skip visual separators (mostly dashes, underscores, etc.)
+		if isVisualSeparator(text) {
+			p.Send(logMsg(fmt.Sprintf("Skipping visual separator: %s", text)))
+			continue
+		}
+
 		// Quick mode: Only translate if target cell is empty or just "Text"
 		if translationMode == "quick" {
 			if len(row) > targetIndex {
@@ -474,6 +497,13 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 
 		var translatedText string
 		var err error
+
+		// If current text is exactly the same as previous text, reuse translation
+		if text == previousText && previousTranslation != "" {
+			translatedText = previousTranslation
+			p.Send(logMsg(fmt.Sprintf("Reused identical translation for: %s", text)))
+			goto saveAndContinue
+		}
 
 		// Handle # pattern (existing logic)
 		if strings.Contains(text, "#") && strings.Contains(previousText, "#") {
