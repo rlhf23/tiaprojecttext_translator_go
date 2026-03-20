@@ -34,7 +34,7 @@ func getVersion() string {
 		return version
 	}
 	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Version != "" {
+		if info.Main.Version != "" && !strings.HasPrefix(info.Main.Version, "v0.0.0-") {
 			return info.Main.Version
 		}
 	}

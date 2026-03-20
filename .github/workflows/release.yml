@@ -26,7 +26,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
 
       - name: Build Windows executable
-        run: go build -ldflags="-s -w" -o translator.exe .
+        run: |
+          VERSION=$(git describe --tags --always)
+          go build -ldflags="-s -w -X main.version=${VERSION}" -o translator.exe .
         env:
           GOOS: windows
           GOARCH: amd64
