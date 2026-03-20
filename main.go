@@ -95,7 +95,13 @@ func (m model) View() string {
 
 	progressView := m.progressBar.View() + "\n\n"
 
-	logs := strings.Join(m.logMessages, "\n")
+	displayCount := 20
+	var logs string
+	if len(m.logMessages) > displayCount {
+		logs = strings.Join(m.logMessages[len(m.logMessages)-displayCount:], "\n")
+	} else {
+		logs = strings.Join(m.logMessages, "\n")
+	}
 
 	var help string
 	if !m.done {
@@ -153,18 +159,78 @@ func extractBaseAndSuffix(text string) (string, string) {
 // isVisualSeparator checks if text is mostly visual separators (dashes, underscores, etc.)
 func isVisualSeparator(text string) bool {
 	if len(text) < 5 {
-		return false // Too short to be a separator
+		return false
 	}
-
 	separatorChars := 0
 	for _, char := range text {
 		if char == '-' || char == '_' || char == '=' || char == '*' || char == '.' {
 			separatorChars++
 		}
 	}
-
-	// If 80% or more of the characters are separators, consider it a separator line
 	return float64(separatorChars)/float64(len(text)) >= 0.8
+}
+
+func hasSpaceNumberPattern(text string) bool {
+	lastSpace := strings.LastIndex(text, " ")
+	if lastSpace == -1 || lastSpace == len(text)-1 {
+		return false
+	}
+	_, err := strconv.Atoi(text[lastSpace+1:])
+	return err == nil
+}
+
+func extractSpaceBaseAndSuffix(text string) (string, string) {
+	lastSpace := strings.LastIndex(text, " ")
+	if lastSpace == -1 || lastSpace == len(text)-1 {
+		return text, ""
+	}
+	base := text[:lastSpace]
+	suffix := text[lastSpace+1:]
+	return base, suffix
+}
+
+func shouldReuseTranslation(currentText, previousText string) (bool, string, string, string) {
+	if hasUnderscoreNumberPattern(currentText) && hasUnderscoreNumberPattern(previousText) {
+		currentBase, currentSuffix := extractBaseAndSuffix(currentText)
+		previousBase, _ := extractBaseAndSuffix(previousText)
+		if currentBase == previousBase {
+			return true, currentBase, currentSuffix, "_"
+		}
+	}
+	if hasSpaceNumberPattern(currentText) && hasSpaceNumberPattern(previousText) {
+		currentBase, currentSuffix := extractSpaceBaseAndSuffix(currentText)
+		previousBase, _ := extractSpaceBaseAndSuffix(previousText)
+		if currentBase == previousBase {
+			return true, currentBase, currentSuffix, " "
+		}
+	}
+	if strings.Contains(currentText, "#") && strings.Contains(previousText, "#") {
+		currentParts := strings.SplitN(currentText, "#", 2)
+		previousParts := strings.SplitN(previousText, "#", 2)
+		if len(currentParts) == 2 && len(previousParts) == 2 && currentParts[0] == previousParts[0] {
+			return true, strings.TrimSpace(currentParts[0]), strings.TrimSpace(currentParts[1]), "#"
+		}
+	}
+	return false, "", "", ""
+}
+
+func extractTranslatedBase(translation, delim string) string {
+	switch delim {
+	case "_":
+		base, _ := extractBaseAndSuffix(translation)
+		return base
+	case " ":
+		base, _ := extractSpaceBaseAndSuffix(translation)
+		return base
+	case "#":
+		parts := strings.SplitN(translation, "#", 2)
+		if len(parts) == 2 {
+			return parts[0]
+		}
+		return translation
+	default:
+		return translation
+	}
 }
 
 func main() {
@@ -505,58 +571,25 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			goto saveAndContinue
 		}
 
-		// Handle # pattern (existing logic)
-		if strings.Contains(text, "#") && strings.Contains(previousText, "#") {
-			currentParts := strings.SplitN(text, "#", 2)
-			previousParts := strings.SplitN(previousText, "#", 2)
-
-			if len(currentParts) == 2 && len(previousParts) == 2 && currentParts[0] == previousParts[0] {
-				translatedPreviousParts := strings.SplitN(previousTranslation, "#", 2)
-				if len(translatedPreviousParts) == 2 {
-					suffix := strings.TrimSpace(currentParts[1])
-					if _, err := strconv.Atoi(suffix); err == nil {
-						translatedText = translatedPreviousParts[0] + "#" + suffix
-						p.Send(logMsg(fmt.Sprintf("Reused prefix for: %s", text)))
-					} else {
-						p.Send(logMsg(fmt.Sprintf("Translating suffix: %s", suffix)))
-						suffixTranslation, err := translateText(client, suffix, sourceLang, targetLang)
-						if err != nil {
-							p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
-							translatedText = text
-						} else {
-							translatedText = translatedPreviousParts[0] + "#" + suffixTranslation
-						}
-					}
-					goto saveAndContinue
-				}
-			}
-		}
-
-		// Handle underscore + number pattern (new logic)
-		if hasUnderscoreNumberPattern(text) && hasUnderscoreNumberPattern(previousText) {
-			currentBase, currentSuffix := extractBaseAndSuffix(text)
-			previousBase, _ := extractBaseAndSuffix(previousText)
-
-			if currentBase == previousBase {
-				translatedPreviousBase, _ := extractBaseAndSuffix(previousTranslation)
-				if _, err := strconv.Atoi(currentSuffix); err == nil {
-					// Current suffix is a number, reuse the translated base
-					translatedText = translatedPreviousBase + "_" + currentSuffix
-					p.Send(logMsg(fmt.Sprintf("Reused base for: %s", text)))
-					goto saveAndContinue
+		// Check if we can reuse translation based on pattern matching
+		if shouldReuse, _, currentSuffix, delim := shouldReuseTranslation(text, previousText); shouldReuse {
+			translatedPreviousBase := extractTranslatedBase(previousTranslation, delim)
+			if _, err := strconv.Atoi(currentSuffix); err == nil {
+				// Suffix is a number, reuse the translated base
+				translatedText = translatedPreviousBase + delim + currentSuffix
+				p.Send(logMsg(fmt.Sprintf("Reused base for: %s", text)))
+			} else {
+				// Suffix is not a number, translate it
+				p.Send(logMsg(fmt.Sprintf("Translating suffix: %s", currentSuffix)))
+				suffixTranslation, err := translateText(client, currentSuffix, sourceLang, targetLang)
+				if err != nil {
+					p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
+					translatedText = text
 				} else {
-					// Current suffix is not a number, translate it
-					p.Send(logMsg(fmt.Sprintf("Translating suffix: %s", currentSuffix)))
-					suffixTranslation, err := translateText(client, currentSuffix, sourceLang, targetLang)
-					if err != nil {
-						p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
-						translatedText = text
-					} else {
-						translatedText = translatedPreviousBase + "_" + suffixTranslation
-					}
-					goto saveAndContinue
+					translatedText = translatedPreviousBase + delim + suffixTranslation
 				}
 			}
+			goto saveAndContinue
 		}
 
 		p.Send(logMsg(fmt.Sprintf("Translating: %s", text)))
