@@ -910,17 +910,33 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			targetText = strings.TrimSpace(row[targetIndex])
 		}
 
-		// Rockwell-specific: Check if target already has **REF:N** from source
+		// Rockwell-specific: Handle **REF:N** patterns
 		if fileType == FileTypeRockwell {
-			// If source is **REF:N** and target is empty, copy source to target
-			if strings.HasPrefix(sourceText, "**REF:") && strings.HasSuffix(sourceText, "**") {
-				if targetText == "" {
+			// Check if source is a REF field
+			isSourceRef := strings.HasPrefix(sourceText, "**REF:") && strings.HasSuffix(sourceText, "**")
+			// Check if target is a REF field
+			isTargetRef := strings.HasPrefix(targetText, "**REF:") && strings.HasSuffix(targetText, "**")
+
+			if isSourceRef {
+				if isTargetRef {
+					// Both source and target are REF fields - skip
+					p.Send(logMsg(fmt.Sprintf("Rockwell: Skipping REF field (both source and target have REF)")))
+					continue
+				} else if targetText == "" {
+					// Source has REF, target is empty - copy source to target
 					cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 					f.SetCellValue(sheetName, cell, sourceText)
-					p.Send(logMsg(fmt.Sprintf("Rockwell: Copied REF: %s", sourceText)))
+					p.Send(logMsg(fmt.Sprintf("Rockwell: Copied REF to target: %s", sourceText)))
 					stats.copied++
 					time.Sleep(10 * time.Millisecond)
+					continue
 				}
+				// Source has REF, target has non-REF content - proceed to check if we should translate
+			}
+
+			// If target already has a REF, skip this row
+			if isTargetRef {
+				p.Send(logMsg(fmt.Sprintf("Rockwell: Skipping row (target has REF): %s", targetText)))
 				continue
 			}
 		}
