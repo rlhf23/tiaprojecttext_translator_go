@@ -353,8 +353,15 @@ func renderProgress(m model) string {
 func renderFooter(m model) string {
 	if m.done {
 		// Summary when complete
-		summary := fmt.Sprintf("Complete!  Translated: %d  |  Reused: %d  |  Copied: %d  |  Errors: %d",
-			m.stats.translated, m.stats.reused, m.stats.copied, m.stats.errors)
+		var parts []string
+		parts = append(parts, fmt.Sprintf("Translated: %d", m.stats.translated))
+		parts = append(parts, fmt.Sprintf("Reused: %d", m.stats.reused))
+		parts = append(parts, fmt.Sprintf("Copied: %d", m.stats.copied))
+		if m.stats.skipped > 0 {
+			parts = append(parts, fmt.Sprintf("Skipped: %d", m.stats.skipped))
+		}
+		parts = append(parts, fmt.Sprintf("Errors: %d", m.stats.errors))
+		summary := "Complete!  " + strings.Join(parts, "  |  ")
 		return successBoxStyle.Render(summary)
 	}
 	// Keyboard shortcuts during translation
