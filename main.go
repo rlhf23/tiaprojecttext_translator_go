@@ -149,6 +149,42 @@ type stats struct {
 	skipped    int
 }
 
+type FileType int
+
+const (
+	FileTypeTIA FileType = iota
+	FileTypeRockwell
+)
+
+func (ft FileType) String() string {
+	switch ft {
+	case FileTypeTIA:
+		return "TIA Portal"
+	case FileTypeRockwell:
+		return "Rockwell FTView"
+	default:
+		return "Unknown"
+	}
+}
+
+func detectFileType(headers []string) FileType {
+	// TIA: Has column with asterisk marker (e.g., "en-US*") OR "ref=" pattern
+	for _, h := range headers {
+		if strings.Contains(h, "*") {
+			return FileTypeTIA
+		}
+		if strings.HasPrefix(h, "ref=") {
+			return FileTypeTIA
+		}
+	}
+	// Rockwell: First header is "Server"
+	if len(headers) > 0 && headers[0] == "Server" {
+		return FileTypeRockwell
+	}
+	// Default to TIA
+	return FileTypeTIA
+}
+
 type model struct {
 	percent     float64
 	logMessages []string
@@ -158,6 +194,7 @@ type model struct {
 	err         error
 	ready       bool
 	fileName    string
+	fileType    FileType
 	mode        string
 	currentRow  int
 	totalRows   int
@@ -529,10 +566,16 @@ func main() {
 		displayErrorAndExit(fmt.Errorf("API key validation failed: %v. Please check your key and try again.", err))
 	}
 
-	files, err := filepath.Glob("*.xlsx")
+	// Find both .xls and .xlsx files
+	xlsxFiles, err := filepath.Glob("*.xlsx")
 	if err != nil {
 		displayErrorAndExit(fmt.Errorf("Error finding .xlsx files: %v", err))
 	}
+	xlsFiles, err := filepath.Glob("*.xls")
+	if err != nil {
+		displayErrorAndExit(fmt.Errorf("Error finding .xls files: %v", err))
+	}
+	files := append(xlsxFiles, xlsFiles...)
 
 	var filteredFiles []string
 	for _, file := range files {
@@ -542,7 +585,7 @@ func main() {
 	}
 
 	if len(filteredFiles) == 0 {
-		displayErrorAndExit(fmt.Errorf("No .xlsx files found to translate."))
+		displayErrorAndExit(fmt.Errorf("No .xls or .xlsx files found to translate."))
 	}
 
 	// Print welcome header
@@ -581,12 +624,35 @@ func main() {
 		displayErrorAndExit(fmt.Errorf("Error getting rows: %v", err))
 	}
 	headers := rows[0]
+
+	// Detect file type from headers
+	fileType := detectFileType(headers)
+	fmt.Println()
+	fmt.Println(statusBoxStyle.Render(fmt.Sprintf("Detected: %s", fileType.String())))
+	fmt.Println()
+
+	// Determine metadata columns based on file type
+	var metadataCols int
+	var skipRefColumns bool
+	switch fileType {
+	case FileTypeTIA:
+		metadataCols = 4
+		skipRefColumns = true
+	case FileTypeRockwell:
+		metadataCols = 5 // Server, Component Type, Component Name, Description, REF
+		skipRefColumns = false
+	}
+
+	// Build column options, skipping metadata and optionally ref columns
 	var colOptions []huh.Option[int]
 	for i, h := range headers {
-		// Skip the first 4 columns (metadata) and any reference columns.
-		if i >= 4 && !strings.HasPrefix(strings.ToLower(h), "ref=") {
-			colOptions = append(colOptions, huh.NewOption(fmt.Sprintf("%s (Col %d)", h, i+1), i))
+		if i < metadataCols {
+			continue // Skip metadata
 		}
+		if skipRefColumns && strings.HasPrefix(strings.ToLower(h), "ref=") {
+			continue // Skip ref columns in TIA
+		}
+		colOptions = append(colOptions, huh.NewOption(fmt.Sprintf("%s (Col %d)", h, i+1), i))
 	}
 
 	modeOptions := []huh.Option[string]{
@@ -606,18 +672,51 @@ func main() {
 		displayErrorAndExit(err)
 	}
 
+	// Show summary screen
+	summaryLines := []string{
+		fmt.Sprintf("File:       %s", fileName),
+		fmt.Sprintf("Type:       %s", fileType.String()),
+		fmt.Sprintf("Source:     %s (Column %d)", headers[sourceLangIndex], sourceLangIndex+1),
+		fmt.Sprintf("Target:     %s (Column %d)", headers[targetLangIndex], targetLangIndex+1),
+		fmt.Sprintf("Mode:       %s", map[string]string{"full": "Full", "quick": "Quick"}[translationMode]),
+		fmt.Sprintf("Total rows: %d", len(rows)-1), // -1 for header
+	}
+	summaryText := strings.Join(summaryLines, "\n")
+
+	confirmVar := true
+	summaryForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Translation Summary").
+				Description(summaryText).
+				Affirmative("Start Translation").
+				Negative("Cancel").
+				Value(&confirmVar),
+		),
+	).WithTheme(formTheme)
+
+	if err := summaryForm.Run(); err != nil {
+		displayErrorAndExit(err)
+	}
+
+	if !confirmVar {
+		fmt.Println("\nTranslation cancelled.")
+		os.Exit(0)
+	}
+
 	// ///////////////////
 	// 2. RUN TRANSLATION WITH TUI
 	// ///////////////////
 	m := model{
 		progressBar: progress.New(progress.WithDefaultGradient()),
 		fileName:    fileName,
+		fileType:    fileType,
 		mode:        translationMode,
 		totalRows:   len(rows),
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode)
+	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode, fileType)
 
 	if _, err := p.Run(); err != nil {
 		displayErrorAndExit(fmt.Errorf("Error running program: %v", err))
@@ -768,7 +867,7 @@ func validateAPIKey(apiKey string) error {
 	return nil
 }
 
-func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string) {
+func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string, fileType FileType) {
 	var stats struct {
 		translated int
 		reused     int
@@ -805,51 +904,73 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			continue
 		}
 
-		text := strings.TrimSpace(row[sourceIndex])
+		sourceText := strings.TrimSpace(row[sourceIndex])
+		var targetText string
+		if len(row) > targetIndex {
+			targetText = strings.TrimSpace(row[targetIndex])
+		}
 
-		// Skip translating the default "Text" value from TIA Portal.
-		if strings.EqualFold(text, "Text") {
+		// Rockwell-specific: Check if target already has **REF:N** from source
+		if fileType == FileTypeRockwell {
+			// If source is **REF:N** and target is empty, copy source to target
+			if strings.HasPrefix(sourceText, "**REF:") && strings.HasSuffix(sourceText, "**") {
+				if targetText == "" {
+					cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
+					f.SetCellValue(sheetName, cell, sourceText)
+					p.Send(logMsg(fmt.Sprintf("Rockwell: Copied REF: %s", sourceText)))
+					stats.copied++
+					time.Sleep(10 * time.Millisecond)
+				}
+				continue
+			}
+		}
+
+		// Skip rows with empty source AND empty target
+		if sourceText == "" && targetText == "" {
 			continue
 		}
 
-		if isPlaceholder(text) {
-			p.Send(logMsg(fmt.Sprintf("Copied placeholder: %s", text)))
+		// Skip translating the default "Text" value from TIA Portal.
+		if strings.EqualFold(sourceText, "Text") {
+			continue
+		}
+
+		if isPlaceholder(sourceText) {
+			p.Send(logMsg(fmt.Sprintf("Copied placeholder: %s", sourceText)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
-			f.SetCellValue(sheetName, cell, text)
+			f.SetCellValue(sheetName, cell, sourceText)
 			stats.copied++
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
 
 		// Copy short texts and numerals in both modes
-		if len(text) < 3 || (len(text) > 0 && text[0] == '!') {
-			p.Send(logMsg(fmt.Sprintf("Copying short text: %s", text)))
+		if len(sourceText) < 3 || (len(sourceText) > 0 && sourceText[0] == '!') {
+			p.Send(logMsg(fmt.Sprintf("Copying short text: %s", sourceText)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
-			f.SetCellValue(sheetName, cell, text)
+			f.SetCellValue(sheetName, cell, sourceText)
 			stats.copied++
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
-		if _, err := strconv.Atoi(text); err == nil {
-			p.Send(logMsg(fmt.Sprintf("Copying numeral: %s", text)))
+		if _, err := strconv.Atoi(sourceText); err == nil {
+			p.Send(logMsg(fmt.Sprintf("Copying numeral: %s", sourceText)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
-			f.SetCellValue(sheetName, cell, text)
+			f.SetCellValue(sheetName, cell, sourceText)
 			stats.copied++
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
 
 		// Skip visual separators (mostly dashes, underscores, etc.)
-		if isVisualSeparator(text) {
-			p.Send(logMsg(fmt.Sprintf("Skipping visual separator: %s", text)))
+		if isVisualSeparator(sourceText) {
+			p.Send(logMsg(fmt.Sprintf("Skipping visual separator: %s", sourceText)))
 			continue
 		}
 
 		// Quick mode: Only translate if target cell is empty or just "Text"
 		if translationMode == "quick" {
 			if len(row) > targetIndex {
-				targetText := strings.TrimSpace(row[targetIndex])
-				// Remove quotes and convert to lowercase for comparison
 				targetTextForCheck := strings.ToLower(strings.Trim(targetText, `"`))
 
 				// Skip if target has meaningful content (not empty and not "text")
@@ -868,20 +989,20 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 		var isReused bool
 
 		// If current text is exactly the same as previous text, reuse translation
-		if text == previousText && previousTranslation != "" {
+		if sourceText == previousText && previousTranslation != "" {
 			translatedText = previousTranslation
-			p.Send(logMsg(fmt.Sprintf("Reused identical translation for: %s", text)))
+			p.Send(logMsg(fmt.Sprintf("Reused identical translation for: %s", sourceText)))
 			isReused = true
 			goto saveAndContinue
 		}
 
 		// Check if we can reuse translation based on pattern matching
-		if shouldReuse, _, currentSuffix, delim := shouldReuseTranslation(text, previousText); shouldReuse {
+		if shouldReuse, _, currentSuffix, delim := shouldReuseTranslation(sourceText, previousText); shouldReuse {
 			translatedPreviousBase := extractTranslatedBase(previousTranslation, delim)
 			if _, err := strconv.Atoi(currentSuffix); err == nil {
 				// Suffix is a number, reuse the translated base
 				translatedText = translatedPreviousBase + delim + currentSuffix
-				p.Send(logMsg(fmt.Sprintf("Reused base for: %s", text)))
+				p.Send(logMsg(fmt.Sprintf("Reused base for: %s", sourceText)))
 				isReused = true
 			} else {
 				// Suffix is not a number, translate it
@@ -889,7 +1010,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 				suffixTranslation, err := translateText(client, currentSuffix, sourceLang, targetLang)
 				if err != nil {
 					p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
-					translatedText = text
+					translatedText = sourceText
 					stats.errors++
 				} else {
 					translatedText = translatedPreviousBase + delim + suffixTranslation
@@ -899,8 +1020,8 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			goto saveAndContinue
 		}
 
-		p.Send(logMsg(fmt.Sprintf("Translating: %s", text)))
-		translatedText, err = translateText(client, text, sourceLang, targetLang)
+		p.Send(logMsg(fmt.Sprintf("Translating: %s", sourceText)))
+		translatedText, err = translateText(client, sourceText, sourceLang, targetLang)
 		if err != nil {
 			p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
 			stats.errors++
@@ -916,7 +1037,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			stats.reused++
 		}
 
-		previousText = text
+		previousText = sourceText
 		previousTranslation = translatedText
 		time.Sleep(50 * time.Millisecond) // Rate limit and slow down for UI
 	}
