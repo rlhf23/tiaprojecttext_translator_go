@@ -214,3 +214,166 @@ func TestShouldReuseTranslation(t *testing.T) {
 		})
 	}
 }
+
+func TestHasEmbeddedRefs(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected bool
+	}{
+		{"Calibration weight: /*N:6 {#1.Calibration_weight} NOFILL DP:3*/", true},
+		{"Stable Weight:", false},
+		{"/*S:0 {Scale\\kg_pounds_string}*/", true},
+		{"Some text /*N:6 {#1.Value}*/ more text", true},
+		{"No refs here", false},
+		{"", false},
+		{"**REF:704**", false},
+		{"Weight: /*N:6 #1.Weight*/ /*S:0 {Unit}*/", true},
+	}
+
+	for _, tc := range testCases {
+		result := hasEmbeddedRefs(tc.input)
+		if result != tc.expected {
+			t.Errorf("hasEmbeddedRefs(%q) = %t; expected %t", tc.input, result, tc.expected)
+		}
+	}
+}
+
+func TestExtractEmbeddedRefs(t *testing.T) {
+	testCases := []struct {
+		name        string
+		input       string
+		expected    []string
+		expectedLen int
+	}{
+		{
+			name:        "Single ref",
+			input:       "Calibration weight: /*N:6 {#1.Calibration_weight} NOFILL DP:3*/",
+			expected:    []string{"/*N:6 {#1.Calibration_weight} NOFILL DP:3*/"},
+			expectedLen: 1,
+		},
+		{
+			name:        "Multiple refs",
+			input:       "Calibration weight: /*N:6 {#1.Calibration_weight}*/ /*S:0 {Scale\\kg_pounds_string}*/",
+			expected:    []string{"/*N:6 {#1.Calibration_weight}*/", "/*S:0 {Scale\\kg_pounds_string}*/"},
+			expectedLen: 2,
+		},
+		{
+			name:        "No refs",
+			input:       "Stable Weight:",
+			expected:    []string{},
+			expectedLen: 0,
+		},
+		{
+			name:        "Ref at end",
+			input:       "Max expected weight: /*N:6 #1.Max_expected NOFILL DP:3*/",
+			expected:    []string{"/*N:6 #1.Max_expected NOFILL DP:3*/"},
+			expectedLen: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := extractEmbeddedRefs(tc.input)
+			if len(result) != tc.expectedLen {
+				t.Errorf("extractEmbeddedRefs(%q) returned %d refs; expected %d", tc.input, len(result), tc.expectedLen)
+			}
+			for i, ref := range result {
+				if i < len(tc.expected) && ref != tc.expected[i] {
+					t.Errorf("extractEmbeddedRefs(%q)[%d] = %q; expected %q", tc.input, i, ref, tc.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestSplitTextByRefs(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "Text with single ref",
+			input:    "Calibration weight: /*N:6 {#1.Calibration_weight} NOFILL DP:3*/",
+			expected: []string{"Calibration weight: ", "/*N:6 {#1.Calibration_weight} NOFILL DP:3*/", ""},
+		},
+		{
+			name:     "Text with two refs",
+			input:    "Weight: /*N:6 {#1.Value}*/ /*S:0 {Unit}*/",
+			expected: []string{"Weight: ", "/*N:6 {#1.Value}*/", " ", "/*S:0 {Unit}*/", ""},
+		},
+		{
+			name:     "No refs",
+			input:    "Stable Weight:",
+			expected: []string{"Stable Weight:"},
+		},
+		{
+			name:     "Ref at start",
+			input:    "/*N:6 {#1.Value}*/ total",
+			expected: []string{"", "/*N:6 {#1.Value}*/", " total"},
+		},
+		{
+			name:     "Only refs",
+			input:    "/*N:6 {#1.Value}*/",
+			expected: []string{"", "/*N:6 {#1.Value}*/", ""},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := splitTextByRefs(tc.input)
+			if len(result) != len(tc.expected) {
+				t.Errorf("splitTextByRefs(%q) returned %d segments; expected %d: %v", tc.input, len(result), len(tc.expected), result)
+				return
+			}
+			for i, seg := range result {
+				if seg != tc.expected[i] {
+					t.Errorf("splitTextByRefs(%q)[%d] = %q; expected %q", tc.input, i, seg, tc.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestReassembleWithRefs(t *testing.T) {
+	testCases := []struct {
+		name       string
+		translated []string
+		expected   string
+	}{
+		{
+			name:       "Single ref preserved",
+			translated: []string{"Peso de calibración: ", "/*N:6 {#1.Calibration_weight} NOFILL DP:3*/"},
+			expected:   "Peso de calibración: /*N:6 {#1.Calibration_weight} NOFILL DP:3*/",
+		},
+		{
+			name:       "Multiple refs preserved",
+			translated: []string{"Weight: ", "/*N:6 {#1.Value}*/", " ", "/*S:0 {Unit}*/"},
+			expected:   "Weight: /*N:6 {#1.Value}*/ /*S:0 {Unit}*/",
+		},
+		{
+			name:       "No refs",
+			translated: []string{"Stable Weight:"},
+			expected:   "Stable Weight:",
+		},
+		{
+			name:       "Ref at start",
+			translated: []string{"", "/*N:6 {#1.Value}*/", " peso total"},
+			expected:   "/*N:6 {#1.Value}*/ peso total",
+		},
+		{
+			name:       "Only refs",
+			translated: []string{"", "/*N:6 {#1.Value}*/", ""},
+			expected:   "/*N:6 {#1.Value}*/",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := reassembleWithRefs(tc.translated)
+			if result != tc.expected {
+				t.Errorf("reassembleWithRefs(%v) = %q; expected %q", tc.translated, result, tc.expected)
+			}
+		})
+	}
+}

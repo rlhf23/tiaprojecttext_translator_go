@@ -550,6 +550,51 @@ func extractTranslatedBase(translation, delim string) string {
 	}
 }
 
+// hasEmbeddedRefs checks if text contains /*...*/ style embedded references
+func hasEmbeddedRefs(text string) bool {
+	return strings.Contains(text, "/*") && strings.Contains(text, "*/")
+}
+
+// embeddedRefRegex matches /*...*/ patterns
+var embeddedRefRegex = regexp.MustCompile(`/\*[^*]*\*/`)
+
+// extractEmbeddedRefs extracts all embedded ref segments from text
+func extractEmbeddedRefs(text string) []string {
+	return embeddedRefRegex.FindAllString(text, -1)
+}
+
+// splitTextByRefs splits text into alternating segments of text and refs
+// Even indices are text (translatable), odd indices are refs (preserve as-is)
+func splitTextByRefs(text string) []string {
+	if !hasEmbeddedRefs(text) {
+		return []string{text}
+	}
+
+	var segments []string
+	lastEnd := 0
+
+	matches := embeddedRefRegex.FindAllStringIndex(text, -1)
+
+	for _, match := range matches {
+		start, end := match[0], match[1]
+		// Add text before this ref (even if empty)
+		segments = append(segments, text[lastEnd:start])
+		// Add the ref itself
+		segments = append(segments, text[start:end])
+		lastEnd = end
+	}
+
+	// Add any remaining text after the last ref (even if empty)
+	segments = append(segments, text[lastEnd:])
+
+	return segments
+}
+
+// reassembleWithRefs joins segments back together, preserving refs
+func reassembleWithRefs(segments []string) string {
+	return strings.Join(segments, "")
+}
+
 func main() {
 	// ///////////////////
 	// 1. GET USER INPUT
@@ -937,6 +982,61 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			// If target already has a REF, skip this row
 			if isTargetRef {
 				p.Send(logMsg(fmt.Sprintf("Rockwell: Skipping row (target has REF): %s", targetText)))
+				continue
+			}
+
+			// Rockwell-specific: Handle embedded refs /*...*/
+			if hasEmbeddedRefs(sourceText) {
+				// In quick mode, if target has same refs pattern, skip
+				if translationMode == "quick" && hasEmbeddedRefs(targetText) {
+					p.Send(logMsg(fmt.Sprintf("Rockwell: Skipping row (target already has embedded refs)")))
+					stats.skipped++
+					continue
+				}
+
+				// Split source into segments
+				segments := splitTextByRefs(sourceText)
+				var translatedSegments []string
+
+				for idx, segment := range segments {
+					if idx%2 == 0 {
+						// Even indices: text segment (translatable)
+						trimmed := strings.TrimSpace(segment)
+						if trimmed == "" {
+							translatedSegments = append(translatedSegments, segment)
+							continue
+						}
+
+						// Translate this text segment
+						p.Send(logMsg(fmt.Sprintf("Rockwell: Translating segment: %s", trimmed)))
+						translated, err := translateText(client, trimmed, sourceLang, targetLang)
+						if err != nil {
+							p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
+							translatedSegments = append(translatedSegments, segment)
+							stats.errors++
+						} else {
+							// Preserve spacing from original
+							if strings.HasPrefix(segment, " ") && !strings.HasPrefix(translated, " ") {
+								translated = " " + translated
+							}
+							if strings.HasSuffix(segment, " ") && !strings.HasSuffix(translated, " ") {
+								translated = translated + " "
+							}
+							translatedSegments = append(translatedSegments, translated)
+							stats.translated++
+						}
+					} else {
+						// Odd indices: ref segment (preserve as-is)
+						translatedSegments = append(translatedSegments, segment)
+					}
+				}
+
+				// Reassemble and save
+				translatedText := reassembleWithRefs(translatedSegments)
+				cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
+				f.SetCellValue(sheetName, cell, translatedText)
+				p.Send(logMsg(fmt.Sprintf("Rockwell: Saved with embedded refs")))
+				time.Sleep(50 * time.Millisecond)
 				continue
 			}
 		}
