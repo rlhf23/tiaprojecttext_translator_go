@@ -42,6 +42,25 @@ func getVersion() string {
 }
 
 // ///////////////////
+// HUH THEME
+// ///////////////////
+func createHuhTheme() *huh.Theme {
+	t := huh.ThemeCharm()
+	t.Focused.Base = t.Focused.Base.BorderBottom(false).BorderTop(false).BorderLeft(false).BorderRight(false)
+	t.Focused.Title = t.Focused.Title.Foreground(colorPrimary).Bold(true)
+	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(colorPrimary)
+	t.Focused.SelectedOption = t.Focused.SelectedOption.Foreground(colorSuccess)
+	t.Focused.UnselectedOption = t.Focused.UnselectedOption.Foreground(colorMuted)
+	t.Focused.TextInput.Cursor = t.Focused.TextInput.Cursor.Foreground(colorPrimary)
+	t.Focused.TextInput.Placeholder = t.Focused.TextInput.Placeholder.Foreground(colorMuted)
+	t.Focused.TextInput.Prompt = t.Focused.TextInput.Prompt.Foreground(colorPrimary)
+	t.Focused.Description = t.Focused.Description.Foreground(colorMuted)
+	return t
+}
+
+var formTheme = createHuhTheme()
+
+// ///////////////////
 // COLORSCHEME
 // ///////////////////
 var (
@@ -519,6 +538,13 @@ func main() {
 		displayErrorAndExit(fmt.Errorf("No .xlsx files found to translate."))
 	}
 
+	// Print welcome header
+	fmt.Println()
+	fmt.Println(headerBoxStyle.Render(headerStyle.Render(fmt.Sprintf("TIA Text Translator %s", getVersion()))))
+	fmt.Println()
+	fmt.Println(statusStyle.Render("Select options to begin translation..."))
+	fmt.Println()
+
 	var fileName string
 	var sourceLangIndex, targetLangIndex int
 	var translationMode string
@@ -530,7 +556,7 @@ func main() {
 
 	form := huh.NewForm(
 		huh.NewGroup(huh.NewSelect[string]().Title("Select a file to translate").Options(fileOptions...).Value(&fileName)),
-	)
+	).WithTheme(formTheme)
 
 	if err := form.Run(); err != nil {
 		displayErrorAndExit(err)
@@ -567,7 +593,7 @@ func main() {
 			huh.NewSelect[int]().Title("Select Target Language Column").Options(colOptions...).Value(&targetLangIndex),
 			huh.NewSelect[string]().Title("Select Translation Mode").Options(modeOptions...).Value(&translationMode),
 		),
-	)
+	).WithTheme(formTheme)
 
 	if err := setupForm.Run(); err != nil {
 		displayErrorAndExit(err)
@@ -701,12 +727,12 @@ func getAPIKey() (string, error) {
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
-				Title("OpenAI API Key Not Found").
-				Description("Please enter your OpenAI API key.\nIt will not be stored, only used for this session.").
+				Title("OpenAI API Key Required").
+				Description("Enter your OpenAI API key (not stored).").
 				Value(&apiKey).
 				Password(true),
 		),
-	)
+	).WithTheme(formTheme)
 
 	if err := form.Run(); err != nil {
 		return "", fmt.Errorf("could not get API key from user: %w", err)
