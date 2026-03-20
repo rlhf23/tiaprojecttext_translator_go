@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
@@ -23,28 +25,125 @@ import (
 )
 
 // ///////////////////
-// TUI STYLES
+// VERSION
+// ///////////////////
+var version = "dev" // Overridden at build time with -ldflags
+
+func getVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" {
+			return info.Main.Version
+		}
+	}
+	return "dev"
+}
+
+// ///////////////////
+// COLORSCHEME
 // ///////////////////
 var (
-	docStyle    = lipgloss.NewStyle().Margin(1, 2)
-	helpStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	errMsgStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	// Base colors
+	colorPrimary = lipgloss.Color("36")  // Cyan
+	colorSuccess = lipgloss.Color("32")  // Green
+	colorWarning = lipgloss.Color("33")  // Yellow
+	colorError   = lipgloss.Color("31")  // Red
+	colorMuted   = lipgloss.Color("8")   // Dark gray
+	colorAccent  = lipgloss.Color("35")  // Magenta
+	colorBorder  = lipgloss.Color("240") // Gray
+
+	// Styles
+	headerStyle = lipgloss.NewStyle().
+			Foreground(colorPrimary).
+			Bold(true).
+			Padding(0, 1)
+
+	statusStyle = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Padding(0, 1)
+
+	progressStyle = lipgloss.NewStyle().
+			Padding(0, 1)
+
+	logStyleTranslating = lipgloss.NewStyle().Foreground(colorWarning)
+	logStyleReused      = lipgloss.NewStyle().Foreground(colorPrimary)
+	logStyleCopied      = lipgloss.NewStyle().Foreground(colorMuted)
+	logStyleError       = lipgloss.NewStyle().Foreground(colorError).Bold(true)
+	logStyleSkipped     = lipgloss.NewStyle().Foreground(colorAccent)
+
+	footerStyle = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Padding(0, 1)
+
+	successBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorSuccess).
+			Foreground(colorSuccess).
+			Padding(0, 1)
+
+	errorBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorError).
+			Foreground(colorError).
+			Padding(0, 1)
+
+	// Box styles for layout
+	headerBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(colorBorder).
+			MarginBottom(1)
+
+	footerBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), true, false, false, false).
+			BorderForeground(colorBorder).
+			MarginTop(1)
 )
 
 // ///////////////////
 // BUBBLETEA MODEL
 // ///////////////////
+type stats struct {
+	translated int
+	reused     int
+	copied     int
+	errors     int
+	skipped    int
+}
+
 type model struct {
 	percent     float64
 	logMessages []string
 	progressBar progress.Model
+	viewport    viewport.Model
 	done        bool
 	err         error
+	ready       bool
+	fileName    string
+	mode        string
+	currentRow  int
+	totalRows   int
+	stats       stats
+	width       int
+	height      int
 }
 
 type progressMsg float64
 type logMsg string
 type doneMsg struct{}
+type statMsg struct {
+	translated int
+	reused     int
+	copied     int
+	errors     int
+	skipped    int
+}
+type fileInfoMsg struct {
+	fileName  string
+	mode      string
+	totalRows int
+}
 
 func (m model) Init() tea.Cmd {
 	return nil
@@ -53,7 +152,46 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		return m, tea.Quit
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "j", "down":
+			if m.ready {
+				m.viewport.ScrollDown(1)
+			}
+			return m, nil
+		case "k", "up":
+			if m.ready {
+				m.viewport.ScrollUp(1)
+			}
+			return m, nil
+		case "g":
+			if m.ready {
+				m.viewport.GotoTop()
+			}
+			return m, nil
+		case "G":
+			if m.ready {
+				m.viewport.GotoBottom()
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		headerHeight := 3
+		progressHeight := 3
+		footerHeight := 2
+		viewportHeight := msg.Height - headerHeight - progressHeight - footerHeight - 4
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+		m.viewport = viewport.New(msg.Width-4, viewportHeight)
+		m.viewport.SetContent(colorizeLogs(m.logMessages))
+		m.ready = true
+		return m, nil
 
 	case progress.FrameMsg:
 		progressModel, cmd := m.progressBar.Update(msg)
@@ -62,55 +200,143 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case progressMsg:
 		m.percent = float64(msg)
+		m.currentRow = int(float64(m.totalRows) * float64(msg))
 		return m, m.progressBar.SetPercent(float64(msg))
 
 	case logMsg:
 		m.logMessages = append(m.logMessages, string(msg))
-		if len(m.logMessages) > 50 {
+		if len(m.logMessages) > 3000 {
 			m.logMessages = m.logMessages[1:]
 		}
+		if m.ready {
+			m.viewport.SetContent(colorizeLogs(m.logMessages))
+			if !m.done {
+				m.viewport.GotoBottom()
+			}
+		}
+		return m, nil
+
+	case statMsg:
+		m.stats.translated += msg.translated
+		m.stats.reused += msg.reused
+		m.stats.copied += msg.copied
+		m.stats.errors += msg.errors
+		m.stats.skipped += msg.skipped
+		return m, nil
+
+	case fileInfoMsg:
+		m.fileName = msg.fileName
+		m.mode = msg.mode
+		m.totalRows = msg.totalRows
 		return m, nil
 
 	case doneMsg:
 		m.done = true
-		// Wait 500ms before quitting to ensure final messages are displayed.
-		return m, func() tea.Msg {
-			time.Sleep(500 * time.Millisecond)
-			return tea.Quit()
-		}
+		m.viewport.GotoBottom()
+		return m, nil
 
 	case error:
 		m.err = msg
-		return m, tea.Quit
+		return m, nil
 
 	default:
-		return m, nil
+		var cmd tea.Cmd
+		if m.ready {
+			m.viewport, cmd = m.viewport.Update(msg)
+		}
+		return m, cmd
 	}
 }
 
 func (m model) View() string {
 	if m.err != nil {
-		return docStyle.Render(errMsgStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+		return errorBoxStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
-	progressView := m.progressBar.View() + "\n\n"
-
-	displayCount := 20
-	var logs string
-	if len(m.logMessages) > displayCount {
-		logs = strings.Join(m.logMessages[len(m.logMessages)-displayCount:], "\n")
-	} else {
-		logs = strings.Join(m.logMessages, "\n")
+	if !m.ready {
+		return "\n  Initializing..."
 	}
 
-	var help string
-	if !m.done {
-		help = helpStyle.Render("Translating... Press any key to quit.")
-	} else {
-		help = helpStyle.Render("Translation complete!")
-	}
+	var b strings.Builder
 
-	return docStyle.Render(progressView + logs + "\n\n" + help)
+	// Header
+	b.WriteString(renderHeader(m))
+	b.WriteString("\n")
+
+	// Status line
+	b.WriteString(renderStatus(m))
+	b.WriteString("\n")
+
+	// Progress
+	b.WriteString(renderProgress(m))
+	b.WriteString("\n")
+
+	// Viewport (logs)
+	b.WriteString(m.viewport.View())
+	b.WriteString("\n")
+
+	// Footer
+	b.WriteString(renderFooter(m))
+
+	return b.String()
+}
+
+func renderHeader(m model) string {
+	title := headerStyle.Render(fmt.Sprintf("TIA Text Translator %s", getVersion()))
+	return headerBoxStyle.Render(title)
+}
+
+func renderStatus(m model) string {
+	modeStr := m.mode
+	if modeStr == "" {
+		modeStr = "Full"
+	}
+	fileStr := m.fileName
+	if len(fileStr) > 30 {
+		fileStr = "..." + fileStr[len(fileStr)-27:]
+	}
+	return statusStyle.Render(fmt.Sprintf("File: %s   Mode: %s   Rows: %d", fileStr, modeStr, m.totalRows))
+}
+
+func renderProgress(m model) string {
+	percent := int(m.percent * 100)
+	progressBar := m.progressBar.View()
+	statsLine := fmt.Sprintf("%d/%d (%d%%)", m.currentRow, m.totalRows, percent)
+	return progressStyle.Render(fmt.Sprintf("%s  %s", progressBar, statsLine))
+}
+
+func renderFooter(m model) string {
+	if m.done {
+		summary := fmt.Sprintf("Complete! Translated: %d | Reused: %d | Copied: %d | Errors: %d",
+			m.stats.translated, m.stats.reused, m.stats.copied, m.stats.errors)
+		return successBoxStyle.Render(summary)
+	}
+	return footerBoxStyle.Render(footerStyle.Render("j/k: scroll   G: bottom   g: top   q: quit"))
+}
+
+func colorizeLogs(logs []string) string {
+	var colored []string
+	for _, msg := range logs {
+		colored = append(colored, colorizeLog(msg))
+	}
+	return strings.Join(colored, "\n")
+}
+
+func colorizeLog(msg string) string {
+	switch {
+	case strings.HasPrefix(msg, "ERROR:"):
+		return logStyleError.Render(msg)
+	case strings.HasPrefix(msg, "Reused"):
+		return logStyleReused.Render(msg)
+	case strings.HasPrefix(msg, "Copied") || strings.HasPrefix(msg, "Copying"):
+		return logStyleCopied.Render(msg)
+	case strings.HasPrefix(msg, "Translating:"):
+		return logStyleTranslating.Render(msg)
+	case strings.HasPrefix(msg, "Quick mode:"):
+		return logStyleSkipped.Render(msg)
+	default:
+		return msg
+	}
 }
 
 // displayErrorAndExit shows an error in a TUI interface before exiting
@@ -324,8 +550,11 @@ func main() {
 	// ///////////////////
 	m := model{
 		progressBar: progress.New(progress.WithDefaultGradient()),
+		fileName:    fileName,
+		mode:        translationMode,
+		totalRows:   len(rows),
 	}
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode)
 
@@ -351,7 +580,7 @@ func main() {
 		}
 	}
 
-	fmt.Println(helpStyle.Render(fmt.Sprintf("\nTranslation saved to %s", newFileName)))
+	fmt.Println(successBoxStyle.Render(fmt.Sprintf("Translation saved to %s", newFileName)))
 }
 
 func translateText(client *openai.Client, text, sourceLang, targetLang string) (string, error) {
@@ -479,10 +708,23 @@ func validateAPIKey(apiKey string) error {
 }
 
 func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string) {
-	var skippedCount int
+	var stats struct {
+		translated int
+		reused     int
+		copied     int
+		errors     int
+		skipped    int
+	}
 	defer func() {
-		if skippedCount > 0 {
-			p.Send(logMsg(fmt.Sprintf("Skipped %d rows in quick mode.", skippedCount)))
+		p.Send(statMsg{
+			translated: stats.translated,
+			reused:     stats.reused,
+			copied:     stats.copied,
+			errors:     stats.errors,
+			skipped:    stats.skipped,
+		})
+		if stats.skipped > 0 {
+			p.Send(logMsg(fmt.Sprintf("Skipped %d rows in quick mode.", stats.skipped)))
 		}
 		p.Send(doneMsg{})
 	}()
@@ -513,6 +755,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			p.Send(logMsg(fmt.Sprintf("Copied placeholder: %s", text)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 			f.SetCellValue(sheetName, cell, text)
+			stats.copied++
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
@@ -522,6 +765,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			p.Send(logMsg(fmt.Sprintf("Copying short text: %s", text)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 			f.SetCellValue(sheetName, cell, text)
+			stats.copied++
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
@@ -529,6 +773,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 			p.Send(logMsg(fmt.Sprintf("Copying numeral: %s", text)))
 			cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 			f.SetCellValue(sheetName, cell, text)
+			stats.copied++
 			time.Sleep(10 * time.Millisecond) // Slow down for UI
 			continue
 		}
@@ -546,16 +791,12 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 				// Remove quotes and convert to lowercase for comparison
 				targetTextForCheck := strings.ToLower(strings.Trim(targetText, `"`))
 
-				// Debug logging for all quick mode checks
-				// p.Send(logMsg(fmt.Sprintf("Quick mode check: target=%q, processed=%q", targetText, targetTextForCheck)))
-
 				// Skip if target has meaningful content (not empty and not "text")
 				shouldSkip := targetTextForCheck != "" && targetTextForCheck != "text"
-				// p.Send(logMsg(fmt.Sprintf("Quick mode decision: skip=%t (empty=%t, isText=%t)", shouldSkip, targetTextForCheck == "", targetTextForCheck == "text")))
 
 				if shouldSkip {
 					p.Send(logMsg(fmt.Sprintf("Quick mode: skipping row %d", i+1)))
-					skippedCount++
+					stats.skipped++
 					continue
 				}
 			}
@@ -563,11 +804,13 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 
 		var translatedText string
 		var err error
+		var isReused bool
 
 		// If current text is exactly the same as previous text, reuse translation
 		if text == previousText && previousTranslation != "" {
 			translatedText = previousTranslation
 			p.Send(logMsg(fmt.Sprintf("Reused identical translation for: %s", text)))
+			isReused = true
 			goto saveAndContinue
 		}
 
@@ -578,6 +821,7 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 				// Suffix is a number, reuse the translated base
 				translatedText = translatedPreviousBase + delim + currentSuffix
 				p.Send(logMsg(fmt.Sprintf("Reused base for: %s", text)))
+				isReused = true
 			} else {
 				// Suffix is not a number, translate it
 				p.Send(logMsg(fmt.Sprintf("Translating suffix: %s", currentSuffix)))
@@ -585,8 +829,10 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 				if err != nil {
 					p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
 					translatedText = text
+					stats.errors++
 				} else {
 					translatedText = translatedPreviousBase + delim + suffixTranslation
+					stats.translated++
 				}
 			}
 			goto saveAndContinue
@@ -596,12 +842,18 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 		translatedText, err = translateText(client, text, sourceLang, targetLang)
 		if err != nil {
 			p.Send(logMsg(fmt.Sprintf("ERROR: %v", err)))
+			stats.errors++
 			continue
 		}
+		stats.translated++
 
 	saveAndContinue:
 		cell, _ := excelize.CoordinatesToCellName(targetIndex+1, i+1)
 		f.SetCellValue(sheetName, cell, translatedText)
+
+		if isReused {
+			stats.reused++
+		}
 
 		previousText = text
 		previousTranslation = translatedText
