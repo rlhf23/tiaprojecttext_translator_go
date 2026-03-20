@@ -46,13 +46,14 @@ func getVersion() string {
 // ///////////////////
 var (
 	// Base colors
-	colorPrimary = lipgloss.Color("36")  // Cyan
-	colorSuccess = lipgloss.Color("32")  // Green
-	colorWarning = lipgloss.Color("33")  // Yellow
-	colorError   = lipgloss.Color("31")  // Red
-	colorMuted   = lipgloss.Color("8")   // Dark gray
-	colorAccent  = lipgloss.Color("35")  // Magenta
-	colorBorder  = lipgloss.Color("240") // Gray
+	colorPrimary  = lipgloss.Color("86")  // Bright cyan
+	colorSuccess  = lipgloss.Color("82")  // Bright green
+	colorWarning  = lipgloss.Color("214") // Orange/yellow
+	colorError    = lipgloss.Color("196") // Bright red
+	colorMuted    = lipgloss.Color("245") // Light gray
+	colorAccent   = lipgloss.Color("213") // Pink/magenta
+	colorBorder   = lipgloss.Color("62")  // Blue-ish border
+	colorBgHeader = lipgloss.Color("236") // Dark background
 
 	// Styles
 	headerStyle = lipgloss.NewStyle().
@@ -77,28 +78,45 @@ var (
 			Foreground(colorMuted).
 			Padding(0, 1)
 
+	// Box styles for layout
+	headerBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPrimary).
+			Padding(0, 1)
+
+	statusBoxStyle = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Padding(0, 1)
+
+	progressBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder(), false, false, true, false).
+				BorderForeground(colorBorder).
+				Padding(0, 1).
+				MarginBottom(1)
+
+	viewportBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorBorder).
+				Padding(0, 0)
+
+	footerBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), true, false, false, false).
+			BorderForeground(colorBorder).
+			Padding(0, 1).
+			MarginTop(1)
+
 	successBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorSuccess).
 			Foreground(colorSuccess).
-			Padding(0, 1)
+			Padding(0, 1).
+			MarginTop(1)
 
 	errorBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorError).
 			Foreground(colorError).
 			Padding(0, 1)
-
-	// Box styles for layout
-	headerBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(colorBorder).
-			MarginBottom(1)
-
-	footerBoxStyle = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), true, false, false, false).
-			BorderForeground(colorBorder).
-			MarginTop(1)
 )
 
 // ///////////////////
@@ -250,7 +268,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.err != nil {
-		return errorBoxStyle.Render(fmt.Sprintf("Error: %v", m.err))
+		return "\n" + errorBoxStyle.Render(fmt.Sprintf(" Error: %v ", m.err)) + "\n"
 	}
 
 	if !m.ready {
@@ -259,7 +277,7 @@ func (m model) View() string {
 
 	var b strings.Builder
 
-	// Header
+	// Header section
 	b.WriteString(renderHeader(m))
 	b.WriteString("\n")
 
@@ -267,12 +285,13 @@ func (m model) View() string {
 	b.WriteString(renderStatus(m))
 	b.WriteString("\n")
 
-	// Progress
+	// Progress section
 	b.WriteString(renderProgress(m))
 	b.WriteString("\n")
 
-	// Viewport (logs)
-	b.WriteString(m.viewport.View())
+	// Viewport (logs) with border
+	viewportContent := m.viewport.View()
+	b.WriteString(viewportBoxStyle.Render(viewportContent))
 	b.WriteString("\n")
 
 	// Footer
@@ -282,8 +301,9 @@ func (m model) View() string {
 }
 
 func renderHeader(m model) string {
-	title := headerStyle.Render(fmt.Sprintf("TIA Text Translator %s", getVersion()))
-	return headerBoxStyle.Render(title)
+	versionStr := getVersion()
+	title := fmt.Sprintf("TIA Text Translator %s", versionStr)
+	return headerBoxStyle.Render(headerStyle.Render(title))
 }
 
 func renderStatus(m model) string {
@@ -292,26 +312,34 @@ func renderStatus(m model) string {
 		modeStr = "Full"
 	}
 	fileStr := m.fileName
-	if len(fileStr) > 30 {
-		fileStr = "..." + fileStr[len(fileStr)-27:]
+	if len(fileStr) > 40 {
+		fileStr = "..." + fileStr[len(fileStr)-37:]
 	}
-	return statusStyle.Render(fmt.Sprintf("File: %s   Mode: %s   Rows: %d", fileStr, modeStr, m.totalRows))
+
+	// Create a compact status line with separators
+	status := fmt.Sprintf("File: %s  |  Mode: %s  |  Rows: %d", fileStr, modeStr, m.totalRows)
+	return statusBoxStyle.Render(status)
 }
 
 func renderProgress(m model) string {
 	percent := int(m.percent * 100)
 	progressBar := m.progressBar.View()
-	statsLine := fmt.Sprintf("%d/%d (%d%%)", m.currentRow, m.totalRows, percent)
-	return progressStyle.Render(fmt.Sprintf("%s  %s", progressBar, statsLine))
+	statsLine := fmt.Sprintf("%3d%% (%d/%d)", percent, m.currentRow, m.totalRows)
+
+	// Combine progress bar and stats
+	line := fmt.Sprintf("%s  %s", progressBar, statsLine)
+	return progressBoxStyle.Render(line)
 }
 
 func renderFooter(m model) string {
 	if m.done {
-		summary := fmt.Sprintf("Complete! Translated: %d | Reused: %d | Copied: %d | Errors: %d",
+		// Summary when complete
+		summary := fmt.Sprintf("Complete!  Translated: %d  |  Reused: %d  |  Copied: %d  |  Errors: %d",
 			m.stats.translated, m.stats.reused, m.stats.copied, m.stats.errors)
 		return successBoxStyle.Render(summary)
 	}
-	return footerBoxStyle.Render(footerStyle.Render("j/k: scroll   G: bottom   g: top   q: quit"))
+	// Keyboard shortcuts during translation
+	return footerBoxStyle.Render(footerStyle.Render("j/k: scroll  |  G: bottom  |  g: top  |  q: quit"))
 }
 
 func colorizeLogs(logs []string) string {
