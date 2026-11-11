@@ -8,11 +8,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -761,28 +764,50 @@ func main() {
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode, fileType)
+	var saveOnce sync.Once
+	var savedFileName string
+	var saveErr error
+	saveOutput := func() (string, error) {
+		saveOnce.Do(func() {
+			baseName := "translated-" + strings.TrimSuffix(fileName, filepath.Ext(fileName))
+			if *csvOutput {
+				savedFileName = baseName + ".csv"
+				saveErr = saveAsCSV(f, sheetName, savedFileName)
+			} else {
+				savedFileName = baseName + ".xlsx"
+				saveErr = f.SaveAs(savedFileName)
+			}
+		})
+		return savedFileName, saveErr
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		saveOutput()
+		_ = p.ReleaseTerminal()
+		if saveErr == nil {
+			fmt.Fprintf(os.Stderr, "\nTranslation saved to %s\n", savedFileName)
+		} else {
+			fmt.Fprintf(os.Stderr, "\nError saving translation to %s: %v\n", savedFileName, saveErr)
+		}
+		os.Exit(1)
+	}()
+
+	go iterateAndTranslate(p, apiKey, f, sheetName, rows, sourceLangIndex, targetLangIndex, headers[sourceLangIndex], headers[targetLangIndex], translationMode, fileType, saveOutput)
 
 	if _, err := p.Run(); err != nil {
 		displayErrorAndExit(fmt.Errorf("Error running program: %v", err))
 	}
+	signal.Stop(sigCh)
 
 	// ///////////////////
-	// 3. SAVE FILE
+	// 3. SAVE FILE (fallback if not already saved)
 	// ///////////////////
-	baseName := "translated-" + strings.TrimSuffix(fileName, filepath.Ext(fileName))
-	var newFileName string
-
-	if *csvOutput {
-		newFileName = baseName + ".csv"
-		if err := saveAsCSV(f, sheetName, newFileName); err != nil {
-			displayErrorAndExit(fmt.Errorf("Error saving new CSV file: %v", err))
-		}
-	} else {
-		newFileName = baseName + ".xlsx"
-		if err := f.SaveAs(newFileName); err != nil {
-			displayErrorAndExit(fmt.Errorf("Error saving new XLSX file: %v", err))
-		}
+	newFileName, err := saveOutput()
+	if err != nil {
+		displayErrorAndExit(fmt.Errorf("Error saving translation: %v", err))
 	}
 
 	fmt.Println(successBoxStyle.Render(fmt.Sprintf("Translation saved to %s", newFileName)))
@@ -808,11 +833,11 @@ var meaninglessAlarmRegex = regexp.MustCompile(`(?i)^alarm\s+\d+:\s*$`) // For a
 
 func isPlaceholder(text string) bool {
 	switch {
-	case strings.HasPrefix(text, "##") && strings.HasSuffix(text, "##"):
+	case strings.HasPrefix(text, "##") && strings.HasSuffix(text, "##") && strings.Count(text, "##") == 2:
 		return true
-	case strings.HasPrefix(text, "#") && strings.HasSuffix(text, "#") && len(text) > 1:
+	case strings.HasPrefix(text, "#") && strings.HasSuffix(text, "#") && !strings.HasPrefix(text, "##") && strings.Count(text, "#") == 2:
 		return true
-	case strings.HasPrefix(text, "@") && strings.HasSuffix(text, "@"):
+	case strings.HasPrefix(text, "@") && strings.HasSuffix(text, "@") && strings.Count(text, "@") == 2:
 		return true
 	case meaninglessAlarmRegex.MatchString(text):
 		return true
@@ -912,7 +937,7 @@ func validateAPIKey(apiKey string) error {
 	return nil
 }
 
-func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string, fileType FileType) {
+func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetName string, rows [][]string, sourceIndex, targetIndex int, sourceLang, targetLang string, translationMode string, fileType FileType, save func() (string, error)) {
 	var stats struct {
 		translated int
 		reused     int
@@ -930,6 +955,13 @@ func iterateAndTranslate(p *tea.Program, apiKey string, f *excelize.File, sheetN
 		})
 		if stats.skipped > 0 {
 			p.Send(logMsg(fmt.Sprintf("Skipped %d rows in quick mode.", stats.skipped)))
+		}
+		if save != nil {
+			if name, err := save(); err != nil {
+				p.Send(logMsg(fmt.Sprintf("ERROR: failed to save output: %v", err)))
+			} else {
+				p.Send(logMsg(fmt.Sprintf("Translation saved to %s", name)))
+			}
 		}
 		p.Send(doneMsg{})
 	}()
