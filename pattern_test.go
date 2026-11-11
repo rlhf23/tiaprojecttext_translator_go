@@ -377,3 +377,27 @@ func TestReassembleWithRefs(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPlaceholder(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected bool
+	}{
+		{"@1%s@", true},
+		{"#TAG#", true},
+		{"##VALUE##", true},
+		{"Alarm 16: ", true},
+		{"@1%s@ Out direction movement blocked by input : @2%s@", false},
+		{"#foo# and #bar#", false},
+		{"##foo## and ##bar##", false},
+		{"Some normal text", false},
+		{"@", false},
+	}
+
+	for _, tc := range testCases {
+		result := isPlaceholder(tc.input)
+		if result != tc.expected {
+			t.Errorf("isPlaceholder(%q) = %t; expected %t", tc.input, result, tc.expected)
+		}
+	}
+}
